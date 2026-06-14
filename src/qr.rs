@@ -3,9 +3,23 @@ use crate::encoding::{ENC_ALPHA, ENC_BYTES, ENC_KANJI, ENC_NUMERIC};
 use crate::encoding::{get_bit_length, get_data_encoding_mode};
 use crate::versioning::get_min_required_version;
 use bitvec::prelude::*;
+use itertools::Itertools;
+
+// Cleanup TODO: magic constants.
 
 const PADDING_HI: u8 = 236;
 const PADDING_LOW: u8 = 17;
+// Move the sign bit to bit 12 (sign extend), complement and then cast to u16
+// This masks off the bottom 11 bits per the Alphanumeric encoding scheme
+// The top bits will all be zeroed out.
+const ALPHA_TWO_CHAR: u16 = !((1u16 << 15) as i16 >> 4) as u16;
+// Move the sign bit to bit 7 (sign extend), complement and then cast to u16
+// Odd Alphanumeric strings use a 6-bit integer as the final bit-string
+const ALPHA_ONE_CHAR: u16 = !((1u16 << 15) as i16 >> 9) as u16;
+
+const BYTE_LENGTH: usize = 8;
+const ALPHA_LENGTH: usize = 11;
+const ALPHA_HALF_LENGTH: usize = 6;
 
 // I'm not interested in getting very clever with masking/shifts to operate at byte-level
 // For now, bitvec is fine.
@@ -50,8 +64,7 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     // I'm not quite sure if/whether it's possible/worth the headache to try and swap.
     // To do this LE, would have to be Lsb0 traversal, le stores, and the insertion writing
     // needs to be backward (end of bitvec -> front of bitvec).
-    // I -believe- this can be achieved by just calling bitvec.reverse()
-    // then swap the endianness of Vec<u8>
+    // Only look into this when it becomes an issue.
     let mut bits = bitvec![u8, Msb0; 0; array_len];
     let idx = 4;
     bits[0..idx].store_be(mode);
@@ -60,15 +73,15 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     // idx += bit_length;
     // Finish processing the data.
     let mut end_idx = match mode {
-        ENC_NUMERIC => encode_numeric(data, &mut bits, idx + bit_length, bit_length),
-        ENC_ALPHA => encode_alpha(data, &mut bits, idx + bit_length, bit_length),
-        ENC_BYTES => encode_bytes(data, &mut bits, idx + bit_length, bit_length),
-        ENC_KANJI => encode_kanji(data, &mut bits, idx + bit_length, bit_length),
+        ENC_NUMERIC => encode_numeric(data, &mut bits, idx + bit_length),
+        ENC_ALPHA => encode_alpha(data, &mut bits, idx + bit_length),
+        ENC_BYTES => encode_bytes(data, &mut bits, idx + bit_length),
+        ENC_KANJI => encode_kanji(data, &mut bits, idx + bit_length),
         _ => panic!("INVALID MODE: {}", mode),
     };
 
     // Get the number of codewords
-    let num_codewords = CODEWORDS[(version * 4) as usize + ecc_level.capacity_idx()];
+    let num_codewords = CODEWORDS[((version - 1) * 4) as usize + ecc_level.capacity_idx()];
     // Compute the total number of bits for the QR.
     let total_bits = num_codewords * 8;
 
@@ -104,33 +117,49 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
 
 // TODO: make into result types.
 // TODO: return the INDEX
-fn encode_numeric(
-    data: &str,
-    bitfield: &mut BitVec<u8, Msb0>,
-    start_idx: usize,
-    bit_length: usize,
-) -> usize {
+fn encode_numeric(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
     let mut idx = start_idx;
 
     todo!("Implement encode numeric");
 }
 
-fn encode_alpha(
-    data: &str,
-    bitfield: &mut BitVec<u8, Msb0>,
-    start_idx: usize,
-    bit_length: usize,
-) -> usize {
-    todo!("Implement encode alphanumeric");
+fn encode_alpha(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
+    // The iterator will panic on 0-characters.
+    if data.is_empty() {
+        return start_idx;
+    }
+    let mut idx = start_idx;
+
+    // Iterate over pairs of characters in the string.
+    for mut pair in data.chars().chunks(2).into_iter() {
+        let c1 = pair.next();
+        let c2 = pair.next();
+
+        match (c1, c2) {
+            (Some(c1), Some(c2)) => {
+                let c1_val = get_alphanumeric_value(c1);
+                let c2_val = get_alphanumeric_value(c2);
+                let rval = 45 * c1_val + c2_val;
+                let masked = rval & ALPHA_TWO_CHAR;
+                bitfield[idx..idx + ALPHA_LENGTH].store_be(masked);
+                idx += ALPHA_LENGTH;
+            }
+            // Perhaps this is firing multiple times.
+            (Some(c1), None) => {
+                let c1_val = get_alphanumeric_value(c1);
+                let masked = c1_val & ALPHA_ONE_CHAR;
+                bitfield[idx..idx + ALPHA_HALF_LENGTH].store_be(masked);
+                idx += ALPHA_HALF_LENGTH;
+            }
+            _ => unreachable!("It's not possible to iterate more than 2 characters at once."),
+        }
+    }
+
+    idx
 }
 
 // RETURNS THE IDX of the next insertion point.
-fn encode_bytes(
-    data: &str,
-    bitfield: &mut BitVec<u8, Msb0>,
-    start_idx: usize,
-    bit_length: usize,
-) -> usize {
+fn encode_bytes(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
     let mut idx = start_idx;
     // Try and re-encode to ISO 8859-1
     let bytes = match try_encode_iso_8859_1(data) {
@@ -143,18 +172,13 @@ fn encode_bytes(
     // Fill the bitfield, padding taken care of by remaining bits
     // Last 4 bits should be terminator (if needed)
     for byte in bytes {
-        bitfield[idx..idx + bit_length].store_be(byte);
-        idx += bit_length;
+        bitfield[idx..idx + BYTE_LENGTH].store_be(byte);
+        idx += BYTE_LENGTH;
     }
     idx
 }
 
-fn encode_kanji(
-    data: &str,
-    bitfield: &mut BitVec<u8, Msb0>,
-    start_idx: usize,
-    bit_length: usize,
-) -> usize {
+fn encode_kanji(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
     todo!("Implement encode kanji");
 }
 
@@ -172,4 +196,58 @@ fn try_encode_iso_8859_1(data: &str) -> Result<Vec<u8>, ISOError> {
         }
     }
     Ok(bytes)
+}
+
+// TODO: Result type/better error handling.
+// For now, just panic.
+#[inline]
+fn get_alphanumeric_value(c: char) -> u16 {
+    match c {
+        '0' => 0,
+        '1' => 1,
+        '2' => 2,
+        '3' => 3,
+        '4' => 4,
+        '5' => 5,
+        '6' => 6,
+        '7' => 7,
+        '8' => 8,
+        '9' => 9,
+        'A' => 10,
+        'B' => 11,
+        'C' => 12,
+        'D' => 13,
+        'E' => 14,
+        'F' => 15,
+        'G' => 16,
+        'H' => 17,
+        'I' => 18,
+        'J' => 19,
+        'K' => 20,
+        'L' => 21,
+        'M' => 22,
+        'N' => 23,
+        'O' => 24,
+        'P' => 25,
+        'Q' => 26,
+        'R' => 27,
+        'S' => 28,
+        'T' => 29,
+        'U' => 30,
+        'V' => 31,
+        'W' => 32,
+        'X' => 33,
+        'Y' => 34,
+        'Z' => 35,
+        ' ' => 36,
+        '$' => 37,
+        '%' => 38,
+        '*' => 39,
+        '+' => 40,
+        '-' => 41,
+        '.' => 42,
+        '/' => 43,
+        ':' => 44,
+        _ => panic!("Invalid character: {c}"),
+    }
 }
