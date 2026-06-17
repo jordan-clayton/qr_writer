@@ -64,7 +64,9 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     // I'm not quite sure if/whether it's possible/worth the headache to try and swap.
     // To do this LE, would have to be Lsb0 traversal, le stores, and the insertion writing
     // needs to be backward (end of bitvec -> front of bitvec).
-    // Only look into this when it becomes an issue.
+    // After which, the entire bitstring would need to be reversed for writing to an image (I
+    // believe).
+    // Only look into this if speed becomes an issue.
     let mut bits = bitvec![u8, Msb0; 0; array_len];
     let idx = 4;
     bits[0..idx].store_be(mode);
@@ -116,11 +118,62 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
 }
 
 // TODO: make into result types.
-// TODO: return the INDEX
+// TODO: Refactor into result types after debugging. This function should never be called on
+// non-numeric data.
 fn encode_numeric(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
+    // The iterator will panic on 0-characters.
+    if data.is_empty() {
+        return start_idx;
+    }
+
     let mut idx = start_idx;
 
-    todo!("Implement encode numeric");
+    // Closures for triplet-processing
+    let one_digit = |c1: char, bitfield: &mut BitVec<u8, Msb0>, idx: usize| {
+        const ONE_DIGIT_BITLEN: usize = 4;
+        // Assert ascii char
+        assert!(c1.is_ascii_digit());
+        let num = (c1 as u8) - b'0';
+        bitfield[idx..idx + ONE_DIGIT_BITLEN].store_be(num);
+        ONE_DIGIT_BITLEN
+    };
+    let two_digit = |c1: char, c2: char, bitfield: &mut BitVec<u8, Msb0>, idx: usize| {
+        const TWO_DIGIT_BITLEN: usize = 7;
+        assert!(c1.is_ascii_digit() && c2.is_ascii_digit());
+        let num1 = (c1 as u16) - b'0' as u16;
+        let num2 = (c2 as u16) - b'0' as u16;
+        let num = num1 * 10 + num2;
+        bitfield[idx..idx + TWO_DIGIT_BITLEN].store_be(num);
+        TWO_DIGIT_BITLEN
+    };
+    let three_digit =
+        |c1: char, c2: char, c3: char, bitfield: &mut BitVec<u8, Msb0>, idx: usize| {
+            const THREE_DIGIT_BITLEN: usize = 10;
+            assert!(c1.is_ascii_digit() && c2.is_ascii_digit() && c3.is_ascii_digit());
+            let num1 = (c1 as u16) - b'0' as u16;
+            let num2 = (c2 as u16) - b'0' as u16;
+            let num3 = (c3 as u16) - b'0' as u16;
+            let num = num1 * 100 + num2 * 10 + num3;
+            bitfield[idx..idx + THREE_DIGIT_BITLEN].store_be(num);
+            THREE_DIGIT_BITLEN
+        };
+
+    // NOTE: Thonky reference diverges from ZXing/most QR implementations with its leading-zero
+    // treatment. Leading zeros don't seem to be relevant here.
+    for mut triplet in data.chars().chunks(3).into_iter() {
+        let c1 = triplet.next();
+        let c2 = triplet.next();
+        let c3 = triplet.next();
+        let inc = match (c1, c2, c3) {
+            (Some(c1), Some(c2), Some(c3)) => three_digit(c1, c2, c3, bitfield, idx),
+            (Some(c1), Some(c2), None) => two_digit(c1, c2, bitfield, idx),
+            (Some(c1), None, None) => one_digit(c1, bitfield, idx),
+            _ => unreachable!("The iterator cannot produce leading Nones"),
+        };
+        idx += inc;
+    }
+
+    idx
 }
 
 fn encode_alpha(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {

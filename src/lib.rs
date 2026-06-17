@@ -45,7 +45,6 @@ mod tests {
     #[test]
     fn test_alphanumeric_encoding() {
         // Taken from: https://www.thonky.com/qr-code-tutorial/data-encoding#add-pad-bytes-if-the-string-is-still-too-short
-
         let data = "HELLO WORLD";
         let expect: [u8; 13] = [
             0b00100000, 0b01011011, 0b00001011, 0b01111000, 0b11010001, 0b01110010, 0b11011100,
@@ -61,6 +60,35 @@ mod tests {
         assert_eq!(version, 1);
 
         // This should be a V1-Q code
+        let res = encode_data_to_bytes(data, ECCLevel::Q);
+        assert_eq!(res, expect);
+    }
+
+    #[test]
+    fn test_numeric_encoding() {
+        // Taken from: https://www.thonky.com/qr-code-tutorial/numeric-mode-encoding
+        let data = "8675309";
+
+        // Binary string:
+        // 110110001110000100101001
+        // EC level Q -> 13 codepoints.
+        let expect: [u8; 13] = [
+            0b00010000, 0b00011111, 0b01100011, 0b10000100,
+            0b10100100, // 2 bits of the terminator in last byte.
+            // Add 2 zero-bits + 6 for byte alignment = one zero-byte
+            0b00000000, // Padding starts after this byte
+            236, 17, 236, 17, 236, 17, 236,
+        ];
+
+        let mode = get_data_encoding_mode(data);
+
+        // Ensure it's numeric mode
+        assert_eq!(mode, 1);
+
+        // Ensure it's version 1.
+        let version = get_min_required_version(data.len(), mode, ECCLevel::Q);
+        assert_eq!(version, 1);
+
         let res = encode_data_to_bytes(data, ECCLevel::Q);
         assert_eq!(res, expect);
     }
