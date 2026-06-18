@@ -30,6 +30,13 @@ const ALPHA_HALF_LENGTH: usize = 6;
 const BYTE_LENGTH: usize = 8;
 const KANJI_BIT_LEN: usize = 13;
 
+// TODO:
+// - Group/Block grouping
+// - Galois Field Polynomial operations
+// - Error Codeword generation routine (Reed-Solomon)
+//      - Reed-Solomon gets run on the block.
+// - Interleaving
+
 // I'm not interested in getting very clever with masking/shifts to operate at byte-level
 // For now, bitvec is fine.
 

@@ -1,13 +1,19 @@
+// Galois compile-time tables are computed recursively, so the stack limit needs to be doubled.
+#![recursion_limit = "512"]
 mod ecc;
 mod encoding;
+mod galois;
 mod qr;
 mod tables;
 mod versioning;
 
+// TODO: consider moving the galois tests/other module tests to their respective modules (if/where
+// possible) and reduce visibility where sensible.
 #[cfg(test)]
 mod tests {
     use crate::ecc::ECCLevel;
     use crate::encoding::get_data_encoding_mode;
+    use crate::galois::{EXP_TABLE, FIELD_SIZE, IRR_POLY, LOG_TABLE, REM};
     use crate::qr::encode_data_to_bytes;
     use crate::versioning::get_min_required_version;
 
@@ -110,11 +116,45 @@ mod tests {
         // Assert kanji mode
         assert_eq!(mode, 8);
 
+        // Data needs to be corrected. 3-byte kanji in utf-8 will be oversized.
+        assert_eq!(data.len().rem_euclid(3), 0);
+        let char_count = data.len() / 3;
+
         // Assert version 1.
-        let version = get_min_required_version(data.len(), mode, ECCLevel::H);
+        let version = get_min_required_version(char_count, mode, ECCLevel::H);
+        assert_eq!(version, 1);
 
         // EC level H -> 9 codepoints.
         let res = encode_data_to_bytes(data, ECCLevel::H);
         assert_eq!(res, expect);
+    }
+
+    // This is a quick sanity check to ensure the recursive constant compile-time procedure matches
+    // its iterative equivalent.
+    // The tables need to be correct for GF(256) for reed-solomon.
+    #[test]
+    fn test_galois_tables() {
+        let mut exp = [0usize; FIELD_SIZE];
+        let mut log = [0usize; FIELD_SIZE];
+
+        let mut x = 1usize;
+        for e in exp.iter_mut() {
+            *e = x;
+            x *= 2;
+
+            if x >= 256 {
+                x ^= IRR_POLY;
+                // This just masks out the high bits from the XOR.
+                x &= REM;
+            }
+        }
+
+        // log_2(0) is undefined.
+        for (i, e) in exp.iter().enumerate().take(REM) {
+            log[*e] = i;
+        }
+
+        assert_eq!(EXP_TABLE, exp);
+        assert_eq!(LOG_TABLE, log);
     }
 }
