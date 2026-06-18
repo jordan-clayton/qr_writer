@@ -2,15 +2,8 @@ use crate::ecc::ECCLevel;
 // Again, consider folding this all into lib.rs.
 use crate::encoding::get_mode_idx;
 
-// TODO: Magic constants.
-
 // Per: https://www.thonky.com/qr-code-tutorial/character-capacities
-// TODO: giant CC table, can be 1D array.
-// Value is:
-// (Version (-1) + capacity_idx) * 4 + mode_idx
-// TODO: initialize this properly.
-// TODO: formatting, this is hard to read.
-const CHAR_CAPACITIES: [u16; 40 * 4 * 4] = [
+pub(crate) const CHAR_CAPACITIES: [u16; 40 * 4 * 4] = [
     // Version 1 (Numeric, Alpha, Byte, Kanji)
     41, 25, 17, 10, // L
     34, 20, 14, 8, // M
@@ -102,14 +95,6 @@ const CHAR_CAPACITIES: [u16; 40 * 4 * 4] = [
 pub fn get_min_required_version(num_chars: usize, mode: u8, ecc_level: ECCLevel) -> u8 {
     let mode_idx = get_mode_idx(mode);
     let capacity_idx = ecc_level.capacity_idx();
-
-    if mode == 4 {
-        assert_eq!(num_chars, 23, "num_chars off: {num_chars}");
-        // Expect the idx to be 22, and that CHAR_CAPACITIES[idx] >= (num_chars as u16);
-        // i * 16, + j * 4 + k
-        let idx = (1 * 16) + capacity_idx * 4 + mode_idx;
-        assert_eq!(idx, 22);
-    }
     for version in 0..40 {
         // i * 16, + j * 4 + k
         let idx = version * 16 + capacity_idx * 4 + mode_idx;

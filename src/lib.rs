@@ -1,6 +1,7 @@
 mod ecc;
 mod encoding;
 mod qr;
+mod tables;
 mod versioning;
 
 #[cfg(test)]
@@ -98,10 +99,11 @@ mod tests {
         // Taken from thonky: https://www.thonky.com/qr-code-tutorial/kanji-mode-encoding
         let data = "茗荷";
         // Kanji size in version 1 = 8 bits
-        let expect: [u8;9] = [
-            0b10000000, 0b00101101, 0b01010101, 0b00011010, 0b01011100, // 2 bits of extra padding
+        let expect: [u8; 9] = [
+            0b10000000, 0b00101101, 0b01010101, 0b00011010,
+            0b01011100, // 2 bits of extra padding
             // + 2 more bits (4-bit total terminator) + 6 bits for alignment.
-            0b00000000, 236, 17, 236
+            0b00000000, 236, 17, 236,
         ];
 
         let mode = get_data_encoding_mode(data);

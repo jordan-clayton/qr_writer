@@ -1,6 +1,7 @@
 use crate::ecc::ECCLevel;
 use crate::encoding::{ENC_ALPHA, ENC_BYTES, ENC_KANJI, ENC_NUMERIC};
 use crate::encoding::{get_bit_length, get_data_encoding_mode};
+use crate::tables::*;
 use crate::versioning::get_min_required_version;
 use bitvec::prelude::*;
 use itertools::Itertools;
@@ -31,17 +32,6 @@ const KANJI_BIT_LEN: usize = 13;
 
 // I'm not interested in getting very clever with masking/shifts to operate at byte-level
 // For now, bitvec is fine.
-// TODO: grab the ECC codeblock table and place somewhere sensible
-const CODEWORDS: [u8; 8] = [
-    19, // 1-L
-    16, // 1-M
-    13, // 1-Q
-    9,  // 1-H
-    34, // 2-L
-    28, // 2-M
-    16, // 2-Q
-    55, // 2-H
-];
 
 // TODO: implement better error handling
 pub struct QRError;
@@ -127,7 +117,8 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     };
 
     // Get the number of codewords
-    let num_codewords = CODEWORDS[((version - 1) * 4) as usize + ecc_level.capacity_idx()];
+    let num_codewords =
+        CODEWORDS_BY_VERSION_EC_LEVEL[((version - 1) * 4) as usize + ecc_level.capacity_idx()];
     // Compute the total number of bits for the QR.
     let total_bits = num_codewords * 8;
 
