@@ -5,5 +5,12 @@ edition = "2024"
 
 [dependencies]
 bitvec = "1.0.1"
+encoding_rs = {version = "0.8.35", optional = true}
 itertools = "0.14.0"
 regex = "1.12.4"
+
+[features]
+# TODO: get rid of this after impl written
+default = ["kanji"]
+kanji = ["dep:encoding_rs"]
+

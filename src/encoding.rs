@@ -1,3 +1,5 @@
+#[cfg(feature = "kanji")]
+use encoding_rs::*;
 use regex::Regex;
 use std::cell::OnceCell;
 
@@ -11,6 +13,7 @@ pub const ENC_KANJI: u8 = 8;
 const NUMERIC: OnceCell<Regex> = OnceCell::new();
 const ALPHANUMERIC: OnceCell<Regex> = OnceCell::new();
 const LATIN1: OnceCell<Regex> = OnceCell::new();
+#[cfg(feature = "kanji")]
 const KANJI: OnceCell<Regex> = OnceCell::new();
 
 // TODO: rethink visibility organization; public is fine until finished.
@@ -28,14 +31,37 @@ const KANJI: OnceCell<Regex> = OnceCell::new();
 // [ MODE ] [ Bitstream ] -> [MODE] [Bitstream] -> ... -> [0000 (Terminator)]
 // Implement mixing when necessary
 pub fn get_data_encoding_mode(data: &str) -> u8 {
+    #[cfg(feature = "kanji")]
+    {
+        if NUMERIC.get_or_init(init_numeric).is_match(data) {
+            ENC_NUMERIC
+        } else if ALPHANUMERIC.get_or_init(init_alphanumeric).is_match(data) {
+            ENC_ALPHA
+        } else if LATIN1.get_or_init(init_latin1).is_match(data) {
+            ENC_BYTES
+        } else if KANJI.get_or_init(init_kanji).is_match(data) {
+            // Test whether Shift_JIS charset and double-byte kanji.
+            // Otherwise return BYTE/Unicode.
+
+            if is_double_byte_kanji(data) {
+                ENC_KANJI
+            } else {
+                ENC_BYTES
+            }
+        } else {
+            // ECI: Extended channel iterpretation
+            // TODO: Deal with named constants/enums later.
+            0b0111
+        }
+    }
+
+    #[cfg(not(feature = "kanji"))]
     if NUMERIC.get_or_init(init_numeric).is_match(data) {
         ENC_NUMERIC
     } else if ALPHANUMERIC.get_or_init(init_alphanumeric).is_match(data) {
         ENC_ALPHA
     } else if LATIN1.get_or_init(init_latin1).is_match(data) {
         ENC_BYTES
-    } else if KANJI.get_or_init(init_kanji).is_match(data) {
-        ENC_KANJI
     } else {
         // ECI: Extended channel iterpretation
         // TODO: Deal with named constants/enums later.
@@ -88,6 +114,43 @@ pub fn get_bit_length(mode: u8, version: u8) -> Result<u8, InvalidVersionError> 
     Ok(BIT_LENGTH[mode_idx * 3 + ver_idx])
 }
 
+// TODO: this needs testing.
+#[cfg(feature = "kanji")]
+fn is_double_byte_kanji(data: &str) -> bool {
+    let (cow, encoding, errors) = SHIFT_JIS.encode(data);
+
+    if errors {
+        return false;
+    }
+
+    // I'm not sure whether encoding would be different here.
+    // TODO: look at encoding_rs and remove if redundant.
+    if encoding != SHIFT_JIS {
+        return false;
+    }
+
+    let len = cow.len();
+
+    // If it's not even length, it can't be double byte.
+    if len & 1 == 1 {
+        return false;
+    }
+
+    // Double check that it's double-byte kanji
+
+    for i in (0..len).step_by(2) {
+        let byte = cow[i];
+
+        // Taken from ZXing. I do not know how to read/write kanji, but
+        // this range check is important for something.
+        if !(0x81..=0x9F).contains(&byte) && !(0xE0..=0xEB).contains(&byte) {
+            return false;
+        }
+    }
+
+    true
+}
+
 // TODO: check regexes
 // NUMERIC: 0-9 digits
 fn init_numeric() -> Regex {
@@ -104,6 +167,7 @@ fn init_latin1() -> Regex {
     Regex::new(r"^[\x00-\xff]*$").unwrap()
 }
 
+#[cfg(feature = "kanji")]
 // KANJI: Double-byte chars, Shift JIS charset (2 bytes vs utf8's 3-4)
 fn init_kanji() -> Regex {
     Regex::new(r"^[\p{Han}\p{Hiragana}\p{Katakana}]*$").unwrap()
