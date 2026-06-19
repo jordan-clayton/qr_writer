@@ -1,3 +1,4 @@
+use crate::tables::*;
 #[cfg(feature = "kanji")]
 use encoding_rs::*;
 use regex::Regex;
@@ -91,13 +92,6 @@ pub fn get_mode_idx(mode: u8) -> usize {
 
 // TODO: tests module for encoding, make this function private until necessary.
 pub fn get_bit_length(mode: u8, version: u8) -> Result<u8, InvalidVersionError> {
-    const BIT_LENGTH: [u8; 12] = [
-        10, 12, 14, // NUMERIC
-        9, 11, 13, // ALPHANUMERIC
-        8, 16, 16, // LATIN
-        8, 10, 12, // KANJI
-    ];
-
     let ver_idx = match version {
         1..=9 => 0,
         10..=26 => 1,

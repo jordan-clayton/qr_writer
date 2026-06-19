@@ -13,7 +13,10 @@ mod versioning;
 mod tests {
     use crate::ecc::ECCLevel;
     use crate::encoding::get_data_encoding_mode;
-    use crate::galois::{EXP_TABLE, FIELD_SIZE, IRR_POLY, LOG_TABLE, REM};
+    use crate::galois::{
+        EXP_TABLE, FIELD_SIZE, GaloisPolynomial, IRR_POLY, LOG_TABLE, REM, gf_exp, gf_inverse,
+        gf_multiply, gf_poly_add, gf_poly_divide, gf_poly_mul, gf_poly_zero,
+    };
     use crate::qr::encode_data_to_bytes;
     use crate::versioning::get_min_required_version;
 
@@ -156,5 +159,62 @@ mod tests {
 
         assert_eq!(EXP_TABLE, exp);
         assert_eq!(LOG_TABLE, log);
+    }
+
+    #[test]
+    fn test_gf_inverse() {
+        let a = gf_exp(4);
+        let inv = gf_inverse(a);
+
+        let testval = gf_multiply(a, inv);
+        let rem = testval.rem_euclid(FIELD_SIZE);
+
+        assert!(testval > 0);
+        assert_eq!(rem, 1, "a: {a}, inv: {inv}, testval: {testval}");
+    }
+
+    // TODO: test polynomial operations.
+
+    #[test]
+    fn test_polynomial_add() {
+        // 83x^2 + 202
+        let a = GaloisPolynomial::new(&[83, 0, 202]);
+        // 31x + 153
+        let b = GaloisPolynomial::new(&[0, 31, 153]);
+        // 83 XOR 0 = 83, 0 XOR 31 = 31
+        // 202 = 0xCA = 0b11001010
+        // 153 = 0x99 = 0b10011001
+        // XOR => 0b01010011 = 0x53 = 83
+        let expected = GaloisPolynomial::new(&[83, 31, 83]);
+
+        let c = gf_poly_add(&a, &b);
+        assert_eq!(c, expected);
+    }
+
+    #[test]
+    fn test_polynomial_multiply() {
+        // x + 2
+        let a = GaloisPolynomial::new(&[1, 2]);
+        // x + 3
+        let b = GaloisPolynomial::new(&[1, 3]);
+        // (x + 2)(x + 3) = x^2 + x + 6
+        let expected = GaloisPolynomial::new(&[1, 1, 6]);
+        let c = gf_poly_mul(&a, &b);
+        assert_eq!(c, expected);
+    }
+
+    // TODO: more division tests worked out by hand
+    // This is just the inverse of the multiplication, but it should tease out immediate errors.
+    #[test]
+    fn test_polynomial_divide() {
+        let dividend = GaloisPolynomial::new(&[1, 1, 6]);
+        let divisor = GaloisPolynomial::new(&[1, 3]);
+
+        let expect_quotient = GaloisPolynomial::new(&[1, 2]);
+        let expect_remainder = gf_poly_zero();
+
+        let (quotient, remainder) = gf_poly_divide(&dividend, &divisor);
+        assert_eq!(quotient, expect_quotient, "Quotient failure");
+        assert_eq!(remainder, expect_remainder, "Remainder failure");
     }
 }
