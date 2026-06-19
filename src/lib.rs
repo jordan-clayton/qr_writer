@@ -4,6 +4,7 @@ mod ecc;
 mod encoding;
 mod galois;
 mod qr;
+mod reed_solomon;
 mod tables;
 mod versioning;
 
