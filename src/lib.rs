@@ -10,6 +10,9 @@ mod versioning;
 
 // TODO: consider moving the galois tests/other module tests to their respective modules (if/where
 // possible) and reduce visibility where sensible.
+//
+// TODO: more test cases can (and should) be generated using:
+// https://www.nayuki.io/page/creating-a-qr-code-step-by-step
 #[cfg(test)]
 mod tests {
     use crate::ecc::ECCLevel;
@@ -19,7 +22,9 @@ mod tests {
         gf_multiply, gf_poly_add, gf_poly_divide, gf_poly_mul, gf_poly_multiply_by_monomial,
         gf_poly_zero,
     };
-    use crate::qr::encode_data_to_bytes;
+    use crate::qr::{
+        QrSegmentation, compute_ecc_codewords, encode_data_to_bytes, prepare_qr_codewords,
+    };
     use crate::reed_solomon::ReedSolomon;
     use crate::tables::EC_CODEWORDS_PER_BLOCK;
     use crate::versioning::get_min_required_version;
@@ -52,7 +57,7 @@ mod tests {
         let version = get_min_required_version(data.len(), mode, ECCLevel::M);
         assert_eq!(version, 2);
 
-        let res = encode_data_to_bytes(data, ECCLevel::M);
+        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::M);
         assert_eq!(res, expect);
     }
     #[test]
@@ -73,7 +78,7 @@ mod tests {
         assert_eq!(version, 1);
 
         // This should be a V1-Q code
-        let res = encode_data_to_bytes(data, ECCLevel::Q);
+        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::Q);
         assert_eq!(res, expect);
     }
 
@@ -102,7 +107,7 @@ mod tests {
         let version = get_min_required_version(data.len(), mode, ECCLevel::Q);
         assert_eq!(version, 1);
 
-        let res = encode_data_to_bytes(data, ECCLevel::Q);
+        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::Q);
         assert_eq!(res, expect);
     }
 
@@ -132,7 +137,7 @@ mod tests {
         assert_eq!(version, 1);
 
         // EC level H -> 9 codepoints.
-        let res = encode_data_to_bytes(data, ECCLevel::H);
+        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::H);
         assert_eq!(res, expect);
     }
 
@@ -309,7 +314,8 @@ mod tests {
     #[test]
     fn test_build_generator() {
         // Version 1-M
-        let idx = ECCLevel::M.capacity_idx() * 4;
+        let version = 1;
+        let idx = (version - 1) * 4 + ECCLevel::M.capacity_idx();
         let ec_bytes = EC_CODEWORDS_PER_BLOCK[idx] as usize;
         assert_eq!(ec_bytes, 10);
         // Using degree 10, equivalent to the reed_solomon test case.
@@ -371,7 +377,7 @@ mod tests {
         assert_eq!(version, 1);
 
         // This should be a V1-M code
-        let data_codewords = encode_data_to_bytes(data, ECCLevel::M);
+        let (data_codewords, _, _) = encode_data_to_bytes(data, ECCLevel::M);
         assert_eq!(data_codewords, expect_data_codewords);
 
         // Encode the ec bytes.
@@ -384,5 +390,154 @@ mod tests {
 
         // Confirm the EC codewords
         assert_eq!(ec_codewords, expect_ec_codewords);
+    }
+
+    // Test the data segmenting routine.
+    #[test]
+    fn test_data_codeword_segmentation() {
+        // From: https://www.thonky.com/qr-code-tutorial/structure-final-message example
+        let data: [u8; 62] = [
+            67, 85, 70, 134, 87, 38, 85, 194, 119, 50, 6, 18, 6, 103, 38, // Group 1, block 1
+            246, 246, 66, 7, 118, 134, 242, 7, 38, 86, 22, 198, 199, 146,
+            6, // Group 1, block 2
+            182, 230, 247, 119, 50, 7, 118, 134, 87, 38, 82, 6, 134, 151, 50,
+            7, // Group 2, block 1
+            70, 247, 118, 86, 194, 6, 151, 50, 224, 236, 17, 236, 17, 236, 17,
+            236, // Group 2, block 2
+        ];
+
+        // Version 5, ECC level Q
+
+        let segmentation = QrSegmentation::new(
+            data.len(),
+            ECCLevel::Q,
+            // Version 5
+            5,
+        );
+
+        // The group/block data is known, so this will just be hardcoded
+        // -> it can be looked up by table, OR
+        // -> derived from accessing the inner groups/
+        // blocks in each group.
+        //
+        // Group: 1 Block: 1
+        assert_eq!(
+            segmentation.get_block(&data, 0, 0),
+            &[
+                67, 85, 70, 134, 87, 38, 85, 194, 119, 50, 6, 18, 6, 103,
+                38, // Group 1, block 1
+            ]
+        );
+
+        // Group: 1 Block: 2
+        assert_eq!(
+            segmentation.get_block(&data, 0, 1),
+            &[
+                246, 246, 66, 7, 118, 134, 242, 7, 38, 86, 22, 198, 199, 146,
+                6, // Group 1, block 2
+            ]
+        );
+
+        assert_eq!(
+            segmentation.get_block(&data, 1, 0),
+            &[
+                182, 230, 247, 119, 50, 7, 118, 134, 87, 38, 82, 6, 134, 151, 50,
+                7, // Group 2, block 1
+            ]
+        );
+
+        assert_eq!(
+            segmentation.get_block(&data, 1, 1),
+            &[
+                70, 247, 118, 86, 194, 6, 151, 50, 224, 236, 17, 236, 17, 236, 17,
+                236, // Group 2, block 2
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ecc_on_blocks() {
+        // This is known to segment properly per the above test.
+
+        // From: https://www.thonky.com/qr-code-tutorial/structure-final-message example
+        let data: [u8; 62] = [
+            67, 85, 70, 134, 87, 38, 85, 194, 119, 50, 6, 18, 6, 103, 38, // Group 1, block 1
+            246, 246, 66, 7, 118, 134, 242, 7, 38, 86, 22, 198, 199, 146,
+            6, // Group 1, block 2
+            182, 230, 247, 119, 50, 7, 118, 134, 87, 38, 82, 6, 134, 151, 50,
+            7, // Group 2, block 1
+            70, 247, 118, 86, 194, 6, 151, 50, 224, 236, 17, 236, 17, 236, 17,
+            236, // Group 2, block 2
+        ];
+
+        // Version 5, ECC version Q
+        // These are known and do not have to be worked out.
+        let version = 5;
+        let ecc_level = ECCLevel::Q;
+        let table_idx = (version - 1) * 4 + ecc_level.capacity_idx();
+        let ec_bytes = EC_CODEWORDS_PER_BLOCK[table_idx] as usize;
+        assert_eq!(ec_bytes, 18, "EC byte discrepancy.");
+
+        // Segment the data into blocks
+        let segmentation = QrSegmentation::new(
+            data.len(),
+            ECCLevel::Q,
+            // Version 5
+            5,
+        );
+        // Flatten into a block vector.
+        let blocks = segmentation.flatten_to_blocks();
+
+        // Pass to the ECC computation
+        let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&data, &blocks, ec_bytes);
+        assert_eq!(ecc_blocks.len(), 4, "Invalid block computation.");
+
+        // Examine the blocks.
+        let expected_ecc_blocks: [[u8; 18]; 4] = [
+            [
+                213, 199, 11, 45, 115, 247, 241, 223, 229, 248, 154, 117, 154, 111, 86, 161, 111,
+                39,
+            ], // Block 1
+            [
+                87, 204, 96, 60, 202, 182, 124, 157, 200, 134, 27, 129, 209, 17, 163, 163, 120, 133,
+            ], // Block 2
+            [
+                148, 116, 177, 212, 76, 133, 75, 242, 238, 76, 195, 230, 189, 10, 108, 240, 192,
+                141,
+            ], // Block 3
+            [
+                140, 100, 250, 247, 108, 131, 37, 104, 253, 113, 111, 235, 197, 83, 6, 205, 89, 74,
+            ], // Block 4
+        ];
+
+        // Compare each of the blocks and make sure that they're equal
+        for i in 0..ecc_blocks.len() {
+            let ecc_block_data = ecc_blocks[i];
+            let ecc_block = &ecc_bytes[ecc_block_data.start_idx()..=ecc_block_data.end_idx()];
+            let expected_block = &expected_ecc_blocks[i];
+            assert_eq!(ecc_block, expected_block, "Block {} doesn't align.", i + 1);
+        }
+    }
+
+    // This is the full data-processing pipeline up to interleaving
+    // Remainder bits will be tested later.
+    #[test]
+    fn test_prepare_qr_codewords() {
+        // Alphanumeric, version 1, ecc level Q
+        let data = "HELLO WORLD";
+
+        let processed = prepare_qr_codewords(data, ECCLevel::Q);
+
+        let expected: [u8; 26] = [
+            0x20, 0x5B, 0x0B, 0x78, 0xD1, 0x72, 0xDC, 0x4D, 0x43, 0x40, 0xEC, 0x11, 0xEC, 0xA8,
+            0x48, 0x16, 0x52, 0xD9, 0x36, 0x9C, 0x00, 0x2E, 0x0F, 0xB4, 0x7A, 0x10,
+        ];
+
+        assert_eq!(processed.len(), 26, "Wrong size returned.");
+
+        assert_eq!(
+            &processed, &expected,
+            "Error is likely within the interleaving."
+        );
     }
 }

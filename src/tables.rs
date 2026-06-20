@@ -1188,3 +1188,11 @@ pub(crate) const NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_2: [u8; 160] = [
     25,  // 40-Q
     16,  // 40-H
 ];
+
+// Versions 1-40 have a required number of remainder bits to add to the end of the bitstream
+// before writing to a QR matrix
+// Index by version (-1 if version is 1-indexed)
+pub(crate) const REMAINDER_BITS: [u8; 40] = [
+    0, 7, 7, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3,
+    3, 3, 0, 0, 0, 0, 0, 0,
+];

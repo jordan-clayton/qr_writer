@@ -1,6 +1,7 @@
 use crate::ecc::ECCLevel;
 use crate::encoding::{ENC_ALPHA, ENC_BYTES, ENC_KANJI, ENC_NUMERIC};
 use crate::encoding::{get_bit_length, get_data_encoding_mode};
+use crate::reed_solomon::ReedSolomon;
 use crate::tables::*;
 use crate::versioning::get_min_required_version;
 use bitvec::prelude::*;
@@ -30,28 +31,49 @@ const ALPHA_HALF_LENGTH: usize = 6;
 const BYTE_LENGTH: usize = 8;
 const KANJI_BIT_LEN: usize = 13;
 
-// TODO:
-// - Group/Block grouping
-// - Error Codeword generation routine (Reed-Solomon)
-//      - Reed-Solomon gets run on the block.
-// - Interleaving
-
 // I'm not interested in getting very clever with masking/shifts to operate at byte-level
 // For now, bitvec is fine.
 
 // TODO: implement better error handling
 pub struct QRError;
+// TODO: this driver function may best be factored out somewhere else so that it's easier to just
+// look things up.
+// This module file is going to get large.
 pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
-    let bytes = encode_data_to_bytes(data, ecc_level);
-    // Error correction.
+    let qr_interleaved_with_ecc = prepare_qr_codewords(&data, ecc_level);
     todo!("Finish encode qr.");
 }
 
-// TODO: make private once project organized, if possible
-// For now, public is fine and required for testing.
-pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
+// Returns the interleaved codeword/ecc vector to be massaged back into a bitfield.
+pub(crate) fn prepare_qr_codewords(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
+    // Encode data codewords
+    let (bytes, version, _ecc) = encode_data_to_bytes(data, ecc_level);
+
+    #[cfg(debug_assertions)]
+    {
+        // This is overly cautious, but this is just to catch carelessness.
+        // The ECC level should not be modified/changed in the data encoding process.
+        assert_eq!(_ecc, ecc_level);
+    }
+
+    // Compute the groups/blocks
+    let data_blocks = compute_blocks(bytes.len(), ecc_level, version);
+    // Look up the number of ecc_codewords per block
+
+    let idx = (version - 1) * 4 + ecc_level.capacity_idx();
+    let ec_bytes = EC_CODEWORDS_PER_BLOCK[idx] as usize;
+
+    // Compute error correction codewords
+    let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&bytes, &data_blocks, ec_bytes);
+
+    // Perform the interleaving and return
+    interleave_codewords(&bytes, &data_blocks, &ecc_bytes, &ecc_blocks)
+}
+
+pub(crate) fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> (Vec<u8>, usize, ECCLevel) {
     #[cfg(feature = "kanji")]
     let mut char_count = data.len();
+
     #[cfg(not(feature = "kanji"))]
     let char_count = data.len();
 
@@ -70,7 +92,7 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     let version = get_min_required_version(char_count, mode, ecc_level);
     // This is only for encoding the number of characters.
     let bit_length = match get_bit_length(mode, version) {
-        Ok(version) => version as usize,
+        Ok(n_bits) => n_bits as usize,
         Err(_) => {
             panic!("Invalid QR Version supplied!")
         }
@@ -111,7 +133,8 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
         #[cfg(feature = "kanji")]
         ENC_KANJI => {
             // The data needs to be re-encoded from unicode over to ShiftJIS
-            let (cow, enc, has_errors) = SHIFT_JIS.encode(data);
+            // The encoding is already checked to be able to actually return ENC_KANJI
+            let (cow, _enc, has_errors) = SHIFT_JIS.encode(data);
             assert!(!has_errors);
             // Take ownership (copy if needed) of the data and pass the bytes to encode_kanji.
             let data = cow.into_owned();
@@ -155,7 +178,8 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     }
 
     // At this point, we can convert into a vector of bytes and return it.
-    bits.into_vec()
+    // Append the version and the ecc level together for unpacking
+    (bits.into_vec(), version as usize, ecc_level)
 }
 
 // TODO: make into result types.
@@ -372,4 +396,296 @@ fn get_alphanumeric_value(c: char) -> u16 {
         ':' => 44,
         _ => panic!("Invalid character: {c}"),
     }
+}
+
+// ------GROUPING AND BLOCK SEGMENTATION-------
+// TODO: decide whether it's worth it to try and do it by collections of indices
+// It -should- be faster to just index the data/codeword block and flatten the error codewords.
+//
+// It is much easier to reason about as a multidimensional array though, so if this is painful,
+// Massage the data into an n-d array of codewords and accept the penalty.
+// Both ZXing and rxing use a Struct pair of Block/ECC as vectors.
+//
+// This could be a transparent tuple block
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub(crate) enum GroupNo {
+    Group1,
+    Group2,
+}
+
+impl TryFrom<usize> for GroupNo {
+    type Error = ();
+    fn try_from(n: usize) -> Result<Self, Self::Error> {
+        match n {
+            0 => Ok(Self::Group1),
+            1 => Ok(Self::Group2),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(transparent)]
+pub(crate) struct Block(
+    (
+        // start_idx
+        usize,
+        // end_idx -> index not number of elements.
+        // num_elements is end_idx - start_idx + 1
+        usize,
+    ),
+);
+
+impl Block {
+    // The table index should be passed in and precomputed.
+    // (version -1) * 4 + ecc_codeword_idx() -> when version is 1-idxd
+    pub(crate) fn new_data_block(start_idx: usize, group_no: GroupNo, table_idx: usize) -> Self {
+        let num_codewords_per_block = match group_no {
+            GroupNo::Group1 => NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_1[table_idx],
+            GroupNo::Group2 => {
+                let g2_block_codewords = NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_2[table_idx];
+                assert!(
+                    g2_block_codewords > 0,
+                    "table_idx is wrong: {table_idx}. Invalid version or ecc level."
+                );
+                g2_block_codewords
+            }
+        };
+
+        // Start is just the start_idx.
+        // End index is start_idx + num_codewords_per_block - 1
+        let end_idx = start_idx + (num_codewords_per_block as usize) - 1;
+        Self((start_idx, end_idx))
+    }
+
+    // NOTE: the interface for this function doesn't match the data block
+    // This function's only use is in the codeword computation, where the index arithmetic is
+    // handled within the loop (rather than having to reverse-engineer it)
+    // If this poses genuine friction, then swap so that the interfaces and implementations are
+    // similar and correct in the ECC computation function.
+    pub(crate) fn new_ecc_block(start_idx: usize, end_idx: usize) -> Self {
+        Self((start_idx, end_idx))
+    }
+
+    pub(crate) fn start_idx(&self) -> usize {
+        self.0.0
+    }
+    pub(crate) fn end_idx(&self) -> usize {
+        self.0.1
+    }
+}
+
+#[repr(transparent)]
+pub(crate) struct Group(Vec<Block>);
+
+impl Group {
+    // The table index should be passed in and precomputed.
+    // (version -1) * 4 + ecc_codeword_idx() -> when version is 1-idxd
+    pub(crate) fn new(start_idx: usize, group_no: GroupNo, table_idx: usize) -> Self {
+        let mut idx = start_idx;
+
+        // Number of blocks per group is going to depend on the group number.
+        let num_blocks_per_group = match group_no {
+            GroupNo::Group1 => NUM_BLOCKS_GROUP_1[table_idx],
+            GroupNo::Group2 => {
+                let g2_blocks = NUM_BLOCKS_GROUP_2[table_idx];
+                // TODO: refactor to result once done.
+                assert!(
+                    g2_blocks > 0,
+                    "table_idx is wrong: {table_idx}. Invalid version or ecc level."
+                );
+                g2_blocks
+            }
+        };
+
+        let mut res = Vec::with_capacity(num_blocks_per_group as usize);
+
+        for _ in 0..num_blocks_per_group {
+            let block = Block::new_data_block(idx, group_no, table_idx);
+            // Update the indices, the idx is now end_idx + 1
+            idx = block.end_idx() + 1;
+            res.push(block);
+        }
+
+        Self(res)
+    }
+
+    pub(crate) fn blocks(&self) -> &[Block] {
+        &self.0
+    }
+}
+
+// POSSIBLY CONVERT THIS TO AN ITERATOR?
+#[repr(transparent)]
+pub(crate) struct QrSegmentation(Vec<Group>);
+
+impl QrSegmentation {
+    // SUPPLY VERSION 1-indexed
+    pub(crate) fn new(total_codewords: usize, ecc_level: ECCLevel, version: usize) -> Self {
+        // Table indexing:
+        // (version -1) * 4 + ecc_codeword_idx()
+
+        let table_idx = (version - 1) * 4 + ecc_level.capacity_idx();
+        let mut idx = 0;
+
+        // At the moment, there can be at most 2 groups.
+        // Check first before initializing groups.
+        // A table-lookup is extremely cheap and saves on pointless allocations.
+        let num_groups = if NUM_BLOCKS_GROUP_2[table_idx] > 0 {
+            2
+        } else {
+            1
+        };
+
+        let mut res = Vec::with_capacity(num_groups);
+        for i in 0..num_groups {
+            let group_no = i
+                .try_into()
+                .expect("There are only two groups, this should map 1:1 with a C enum");
+            let group = Group::new(idx, group_no, table_idx);
+            // Update the index, is going to be last block's end_idx + 1
+            let end_idx = group
+                .blocks()
+                .last()
+                .expect("There should be at least one block in the group.")
+                .end_idx();
+
+            // New starting index.
+            idx = end_idx + 1;
+
+            // Push the group to the groups vector
+            res.push(group);
+        }
+
+        // (This should really be a result/error condition)
+        // TODO: refactor out the panics/assertions once the code is tested.
+        // Assert that the last index + 1 = total_codewords.
+        //
+        let end_idx = res
+            .last()
+            .expect("There should be at least one group.")
+            .blocks()
+            .last()
+            .expect("There should be at least one block in the group.")
+            .end_idx();
+
+        assert_eq!(
+            end_idx + 1,
+            total_codewords,
+            "INDEX ARITHMETIC IS INCORRECT."
+        );
+
+        // Wrap the group vector and return.
+        Self(res)
+    }
+    pub(crate) fn groups(&self) -> &[Group] {
+        &self.0
+    }
+
+    // Grab the block, return an inclusive slice [start_idx..=end_idx]
+    pub(crate) fn get_block<'a>(&self, data: &'a [u8], group: usize, block: usize) -> &'a [u8] {
+        // TODO: refactor to get/result once bugs teased out.
+        let block = &self.groups()[group].blocks()[block];
+        &data[block.start_idx()..=block.end_idx()]
+    }
+
+    // This gives a constant stream of blocks
+    // It's easiest to do the interleaving as a nested loop, eg:
+    // for byte in 0..data.len(){
+    //      for block in 0..blocks.len() {
+    //          write(data[block.start_idx + byte]
+    //      }
+    // }
+    pub(crate) fn flatten_to_blocks(self) -> Vec<Block> {
+        self.0.into_iter().flat_map(|group| group.0).collect()
+    }
+}
+
+//  --------- STRUCTURING THE FINAL MESSAGE (for writing) ----------
+//  - Segment the data codewords into blocks
+//      - Flatten the segmentation struct into a list of blocks.
+//  - Compute the ECC codewords per block
+//
+//  Note: there is a different number of ECC codewords than data codewords per block,
+//  but all ECC codeword blocks have the same number of codewords per version/ecc level
+//  (table lookup)
+
+// SUPPLY VERSION NUMBER AS 1-INDEXED
+#[inline]
+pub(crate) fn compute_blocks(
+    num_data_codewords: usize,
+    ecc_level: ECCLevel,
+    version: usize,
+) -> Vec<Block> {
+    // Segment the data
+    let segmentation = QrSegmentation::new(num_data_codewords, ecc_level, version);
+    // Flatten it.
+    segmentation.flatten_to_blocks()
+}
+
+// Parent should pre-look up this information.
+// let idx = ((version - 1) * 4) + ecc_level.capacity_idx();
+// let codewords_per_block = EC_CODEWORDS_PER_BLOCK[idx] as usize;
+
+// SUPPLY VERSION NUMBER AS 1-INDEXED
+pub(crate) fn compute_ecc_codewords(
+    data: &[u8],
+    blocks: &[Block],
+    ec_codewords_per_block: usize,
+) -> (Vec<u8>, Vec<Block>) {
+    let mut reed_solomon = ReedSolomon::new();
+
+    let num_blocks = blocks.len();
+    // Preallocate a vector of sufficient size for the codewords.
+    let ecc_vec_size = num_blocks * ec_codewords_per_block;
+    let mut res = Vec::with_capacity(ecc_vec_size);
+    let mut ecc_block_data = Vec::with_capacity(blocks.len());
+
+    let mut ecc_block_idx = 0;
+    for block in blocks {
+        let start_idx = block.start_idx();
+        let end_idx = block.end_idx();
+        let mut next_ecc_bytes =
+            reed_solomon.encode(&data[start_idx..=end_idx], ec_codewords_per_block);
+
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(next_ecc_bytes.len(), ec_codewords_per_block);
+        }
+
+        let next_ecc_block =
+            Block::new_ecc_block(ecc_block_idx, ecc_block_idx + next_ecc_bytes.len() - 1);
+
+        ecc_block_idx += next_ecc_bytes.len();
+        res.append(&mut next_ecc_bytes);
+        ecc_block_data.push(next_ecc_block);
+    }
+
+    (res, ecc_block_data)
+}
+
+// This function only does the interleaving.
+// The remainder bits are not handled until later.
+fn interleave_codewords(
+    data: &[u8],
+    data_blocks: &[Block],
+    ecc_bytes: &[u8],
+    ecc_blocks: &[Block],
+) -> Vec<u8> {
+    let mut interleave = Vec::with_capacity(data.len() + ecc_blocks.len());
+
+    for byte_offset in 0..data.len() {
+        for block in data_blocks {
+            interleave.push(data[block.start_idx() + byte_offset]);
+        }
+    }
+
+    for byte_offset in 0..ecc_bytes.len() {
+        for block in ecc_blocks {
+            interleave.push(ecc_bytes[block.start_idx() + byte_offset]);
+        }
+    }
+
+    interleave
 }
