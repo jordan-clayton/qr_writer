@@ -246,6 +246,8 @@ pub(crate) fn gf_poly_mul(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> Galoi
         return gf_poly_scale(p1, p2.nth_coefficient(0).into());
     }
 
+    // There seems to be a bit of a bug in this multiplication but only for some terms.
+    // The alpha table -seems- correct, this needs some more scrutiny.
     let mut product = vec![0; p1.coefficients().len() + p2.coefficients().len() - 1];
     for i in 0..p1.coefficients().len() {
         let a = p1.coefficients()[i];
@@ -357,7 +359,12 @@ pub(crate) fn gf_add(a: usize, b: usize) -> usize {
 // Returns a * b (mod IRR_POLY) in GF(2^8)
 #[inline]
 pub(crate) fn gf_multiply(a: usize, b: usize) -> usize {
-    EXP_TABLE[(LOG_TABLE[a] + LOG_TABLE[b]).rem_euclid(FIELD_SIZE)]
+    if a == 0 || b == 0 {
+        0
+    } else {
+        // Remainder is field-size - 1, not field-size;
+        EXP_TABLE[(LOG_TABLE[a] + LOG_TABLE[b]).rem_euclid(REM)]
+    }
 }
 
 // returns 2^a (mod IRR_POLY) in GF(2^8)

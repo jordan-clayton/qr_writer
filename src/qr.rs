@@ -123,8 +123,8 @@ pub fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     };
 
     // Get the number of codewords
-    let num_codewords =
-        CODEWORDS_BY_VERSION_EC_LEVEL[((version - 1) * 4) as usize + ecc_level.capacity_idx()];
+    let num_codewords = TOTAL_NUM_CODEWORDS_BY_VERSION_AND_EC_LEVEL
+        [((version - 1) * 4) as usize + ecc_level.capacity_idx()];
     // Compute the total number of bits for the QR.
     let total_bits = num_codewords * 8;
 

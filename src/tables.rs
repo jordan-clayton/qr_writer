@@ -211,7 +211,7 @@ pub(crate) const CHAR_CAPACITIES: [u16; 40 * 4 * 4] = [
     3213, 1947, 1338, 823, // H
 ];
 
-pub(crate) const CODEWORDS_BY_VERSION_EC_LEVEL: [u16; 160] = [
+pub(crate) const TOTAL_NUM_CODEWORDS_BY_VERSION_AND_EC_LEVEL: [u16; 160] = [
     19,   // 1-L
     16,   // 1-M
     13,   // 1-Q
@@ -374,7 +374,7 @@ pub(crate) const CODEWORDS_BY_VERSION_EC_LEVEL: [u16; 160] = [
     1276, // 40-H
 ];
 
-pub(crate) const CODEWORDS_PER_BLOCK: [u8; 160] = [
+pub(crate) const EC_CODEWORDS_PER_BLOCK: [u8; 160] = [
     7,  // 1-L
     10, // 1-M
     13, // 1-Q
@@ -700,7 +700,7 @@ pub(crate) const NUM_BLOCKS_GROUP_1: [u8; 160] = [
     20, // 40-H
 ];
 
-const NUM_CODEWORDS_PER_BLOCK_GROUP_1: [u8; 160] = [
+pub(crate) const NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_1: [u8; 160] = [
     19,  // 1-L
     16,  // 1-M
     13,  // 1-Q
@@ -863,7 +863,7 @@ const NUM_CODEWORDS_PER_BLOCK_GROUP_1: [u8; 160] = [
     15,  // 40-H
 ];
 
-const NUM_BLOCKS_GROUP_2: [u8; 160] = [
+pub(crate) const NUM_BLOCKS_GROUP_2: [u8; 160] = [
     0,  // 1-L
     0,  // 1-M
     0,  // 1-Q
@@ -1026,7 +1026,7 @@ const NUM_BLOCKS_GROUP_2: [u8; 160] = [
     61, // 40-H
 ];
 
-const NUM_CODEWORDS_PER_BLOCK_GROUP_2: [u8; 160] = [
+pub(crate) const NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_2: [u8; 160] = [
     0,   // 1-L
     0,   // 1-M
     0,   // 1-Q
