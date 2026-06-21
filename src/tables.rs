@@ -1196,3 +1196,77 @@ pub(crate) const REMAINDER_BITS: [u8; 40] = [
     0, 7, 7, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3,
     3, 3, 0, 0, 0, 0, 0, 0,
 ];
+
+// This is trivially copyable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AlignmentCenters {
+    Zero,
+    Two(&'static [usize; 2]),
+    Three(&'static [usize; 3]),
+    Four(&'static [usize; 4]),
+    Five(&'static [usize; 5]),
+    Six(&'static [usize; 6]),
+    Seven(&'static [usize; 7]),
+}
+
+impl AlignmentCenters {
+    pub(crate) fn inner(self) -> &'static [usize] {
+        match self {
+            Self::Zero => &[],
+            Self::Two(inner) => inner,
+            Self::Three(inner) => inner,
+            Self::Four(inner) => inner,
+            Self::Five(inner) => inner,
+            Self::Six(inner) => inner,
+            Self::Seven(inner) => inner,
+        }
+    }
+}
+
+// TODO: figure out exactly how to deal with this.
+// as far as I understand, each is a list of indices,
+// and there are list.len() permute 2 total centre points?
+// This also cannot really be constant without redundancy.
+// Even with an enumerated type, it'll take up to 7 for each.
+pub(crate) const ALIGNMENT_BLOCK_CENTERS: [AlignmentCenters; 40] = [
+    AlignmentCenters::Zero,                                   // Version 1
+    AlignmentCenters::Two(&[6, 18]),                          // Version 2
+    AlignmentCenters::Two(&[6, 22]),                          // Version 3
+    AlignmentCenters::Two(&[6, 26]),                          // Version 4
+    AlignmentCenters::Two(&[6, 30]),                          // Version 5
+    AlignmentCenters::Two(&[6, 34]),                          // Version 6
+    AlignmentCenters::Three(&[6, 22, 38]),                    // Version 7
+    AlignmentCenters::Three(&[6, 24, 42]),                    // Version 8
+    AlignmentCenters::Three(&[6, 26, 46]),                    // Version 9
+    AlignmentCenters::Three(&[6, 28, 50]),                    // Version 10
+    AlignmentCenters::Three(&[6, 30, 54]),                    // Version 11
+    AlignmentCenters::Three(&[6, 32, 58]),                    // Version 12
+    AlignmentCenters::Three(&[6, 34, 62]),                    // Version 13
+    AlignmentCenters::Four(&[6, 26, 46, 66]),                 // Version 14
+    AlignmentCenters::Four(&[6, 26, 48, 70]),                 // Version 15
+    AlignmentCenters::Four(&[6, 26, 50, 74]),                 // Version 16
+    AlignmentCenters::Four(&[6, 30, 54, 78]),                 // Version 17
+    AlignmentCenters::Four(&[6, 30, 56, 82]),                 // Version 18
+    AlignmentCenters::Four(&[6, 30, 58, 86]),                 // Version 19
+    AlignmentCenters::Four(&[6, 34, 62, 90]),                 // Version 20
+    AlignmentCenters::Five(&[6, 28, 50, 72, 94]),             // Version 21
+    AlignmentCenters::Five(&[6, 26, 50, 74, 98]),             // Version 22
+    AlignmentCenters::Five(&[6, 30, 54, 78, 102]),            // Version 23
+    AlignmentCenters::Five(&[6, 28, 54, 80, 106]),            // Version 24
+    AlignmentCenters::Five(&[6, 32, 58, 84, 110]),            // Version 25
+    AlignmentCenters::Five(&[6, 30, 58, 86, 114]),            // Version 26
+    AlignmentCenters::Five(&[6, 34, 62, 90, 118]),            // Version 27
+    AlignmentCenters::Six(&[6, 26, 50, 74, 98, 122]),         // Version 28
+    AlignmentCenters::Six(&[6, 30, 54, 78, 102, 126]),        // Version 29
+    AlignmentCenters::Six(&[6, 26, 52, 78, 104, 130]),        // Version 30
+    AlignmentCenters::Six(&[6, 30, 56, 82, 108, 134]),        // Version 31
+    AlignmentCenters::Six(&[6, 34, 60, 86, 112, 138]),        // Version 32
+    AlignmentCenters::Six(&[6, 30, 58, 86, 114, 142]),        // Version 33
+    AlignmentCenters::Six(&[6, 34, 62, 90, 118, 146]),        // Version 34
+    AlignmentCenters::Seven(&[6, 30, 54, 78, 102, 126, 150]), // Version 35
+    AlignmentCenters::Seven(&[6, 24, 50, 76, 102, 128, 154]), // Version 36
+    AlignmentCenters::Seven(&[6, 28, 54, 80, 106, 132, 158]), // Version 37
+    AlignmentCenters::Seven(&[6, 32, 58, 84, 110, 136, 162]), // Version 38
+    AlignmentCenters::Seven(&[6, 26, 54, 82, 110, 138, 166]), // Version 39
+    AlignmentCenters::Seven(&[6, 30, 58, 86, 114, 142, 170]), // Version 40
+];

@@ -1,6 +1,7 @@
 use crate::ecc::ECCLevel;
 use crate::encoding::{ENC_ALPHA, ENC_BYTES, ENC_KANJI, ENC_NUMERIC};
 use crate::encoding::{get_bit_length, get_data_encoding_mode};
+use crate::matrix::QRCodeMatrix;
 use crate::reed_solomon::ReedSolomon;
 use crate::tables::*;
 use crate::versioning::get_min_required_version;
@@ -31,30 +32,51 @@ const ALPHA_HALF_LENGTH: usize = 6;
 const BYTE_LENGTH: usize = 8;
 const KANJI_BIT_LEN: usize = 13;
 
-// I'm not interested in getting very clever with masking/shifts to operate at byte-level
-// For now, bitvec is fine.
+// TODO: type alias for Version: Nonzero<usize>/usize
 
 // TODO: implement better error handling
 pub struct QRError;
 // TODO: this driver function may best be factored out somewhere else so that it's easier to just
 // look things up.
 // This module file is going to get large.
-pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
-    let qr_interleaved_with_ecc = prepare_qr_codewords(&data, ecc_level);
-    todo!("Finish encode qr.");
+
+// TODO: this should return a matrix.
+pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> QRCodeMatrix {
+    let (interleaved_with_ecc, version, ecc_level) = prepare_qr_codewords(&data, ecc_level);
+    // Convert back to a bitfield and add the remainder bits.
+    // Remainder bits are by version and error level.
+    let table_idx = version * 4 + ecc_level.capacity_idx();
+    let n_remainder_bits = REMAINDER_BITS[table_idx] as usize;
+
+    // TODO: refactor assertions to Result during API cleanup
+    let interleaved_bits = interleaved_with_ecc.len() * 8;
+    // Cast to a bitfield and add the remainder bits.
+    let mut bitfield = BitVec::<u8, Msb0>::from_vec(interleaved_with_ecc);
+    bitfield.resize(bitfield.len() + n_remainder_bits, false);
+
+    assert_eq!(bitfield.len(), interleaved_bits + n_remainder_bits);
+    // Assert that the remainder bits are placed at the end--in case I might've slightly
+    // misunderstood the bitvec api.
+    assert!(
+        bitfield[bitfield.len() - n_remainder_bits..]
+            .iter()
+            .all(|b| b == false)
+    );
+
+    QRCodeMatrix::new(version, &bitfield)
 }
 
+// TODO: seriously consider a series of structs to carry the data over tuple structs.
 // Returns the interleaved codeword/ecc vector to be massaged back into a bitfield.
-pub(crate) fn prepare_qr_codewords(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
+// For now:
+// -> propagate version and ecc_level in a tuple-struct: (codewords, version, ecc_level)
+pub(crate) fn prepare_qr_codewords(data: &str, ecc_level: ECCLevel) -> (Vec<u8>, usize, ECCLevel) {
     // Encode data codewords
-    let (bytes, version, _ecc) = encode_data_to_bytes(data, ecc_level);
+    let (bytes, version, ecc) = encode_data_to_bytes(data, ecc_level);
 
-    #[cfg(debug_assertions)]
-    {
-        // This is overly cautious, but this is just to catch carelessness.
-        // The ECC level should not be modified/changed in the data encoding process.
-        assert_eq!(_ecc, ecc_level);
-    }
+    // This is overly cautious, but this is just to catch carelessness.
+    // The ECC level should not be modified/changed in the data encoding process.
+    assert_eq!(ecc, ecc_level);
 
     // Compute the groups/blocks
     let data_blocks = compute_blocks(bytes.len(), ecc_level, version);
@@ -67,7 +89,8 @@ pub(crate) fn prepare_qr_codewords(data: &str, ecc_level: ECCLevel) -> Vec<u8> {
     let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&bytes, &data_blocks, ec_bytes);
 
     // Perform the interleaving and return
-    interleave_codewords(&bytes, &data_blocks, &ecc_bytes, &ecc_blocks)
+    let interleaved = interleave_codewords(&bytes, &data_blocks, &ecc_bytes, &ecc_blocks);
+    (interleaved, version, ecc_level)
 }
 
 pub(crate) fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> (Vec<u8>, usize, ECCLevel) {
@@ -649,10 +672,7 @@ pub(crate) fn compute_ecc_codewords(
         let mut next_ecc_bytes =
             reed_solomon.encode(&data[start_idx..=end_idx], ec_codewords_per_block);
 
-        #[cfg(debug_assertions)]
-        {
-            assert_eq!(next_ecc_bytes.len(), ec_codewords_per_block);
-        }
+        assert_eq!(next_ecc_bytes.len(), ec_codewords_per_block);
 
         let next_ecc_block =
             Block::new_ecc_block(ecc_block_idx, ecc_block_idx + next_ecc_bytes.len() - 1);

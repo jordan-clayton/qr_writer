@@ -3,6 +3,7 @@
 mod ecc;
 mod encoding;
 mod galois;
+mod matrix;
 mod qr;
 mod reed_solomon;
 mod tables;
@@ -22,11 +23,16 @@ mod tests {
         gf_multiply, gf_poly_add, gf_poly_divide, gf_poly_mul, gf_poly_multiply_by_monomial,
         gf_poly_zero,
     };
+    use crate::matrix::{
+        SquareMatrix, emplace_alignment_squares, emplace_finder_patterns_into_blank_matrix,
+        emplace_timing_patterns,
+    };
     use crate::qr::{
-        QrSegmentation, compute_ecc_codewords, encode_data_to_bytes, prepare_qr_codewords,
+        QrSegmentation, compute_ecc_codewords, encode_data_to_bytes, encode_qr,
+        prepare_qr_codewords,
     };
     use crate::reed_solomon::ReedSolomon;
-    use crate::tables::EC_CODEWORDS_PER_BLOCK;
+    use crate::tables::*;
     use crate::versioning::get_min_required_version;
 
     #[test]
@@ -526,7 +532,7 @@ mod tests {
         // Alphanumeric, version 1, ecc level Q
         let data = "HELLO WORLD";
 
-        let processed = prepare_qr_codewords(data, ECCLevel::Q);
+        let (processed, _, _) = prepare_qr_codewords(data, ECCLevel::Q);
 
         let expected: [u8; 26] = [
             0x20, 0x5B, 0x0B, 0x78, 0xD1, 0x72, 0xDC, 0x4D, 0x43, 0x40, 0xEC, 0x11, 0xEC, 0xA8,
@@ -540,4 +546,218 @@ mod tests {
             "Error is likely within the interleaving."
         );
     }
+
+    // NOTE: this test will eventually need to be iterated on
+    // For now, use it to ensure normal execution up to the next todo!().
+    #[test]
+    fn test_encode_qr() {
+        // Alphanumeric, version 1, ecc level Q
+        let data = "HELLO WORLD";
+
+        let encoded = encode_qr(data, ECCLevel::Q);
+
+        todo!("Encode matrix for comparison.");
+    }
+
+    #[test]
+    fn test_emplace_finder_patterns() {
+        // Version 1 has a 21 x 21 square matrix
+        let version = 1;
+        let side_length = (version - 1) * 4 + 21;
+        assert_eq!(side_length, 21);
+        // Construct a square matrix
+        let mut sq_matrix = SquareMatrix::new(side_length);
+        assert_eq!(sq_matrix.side_length(), 21);
+
+        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version);
+        let (mat, _side_length) = sq_matrix.destructure_into_bytes();
+        let expect: [u8; 441] = [
+            //                   //                   //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, //
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, //
+            // --
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            //--
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+        ];
+
+        for i in 0..side_length {
+            for j in 0..side_length {
+                let idx = i * side_length + j;
+                // On a failure it should print out at least a -few- items to stdout.
+                eprint!("{}", mat[idx]);
+
+                let next_idx = i * side_length + j + 1;
+
+                if next_idx < side_length * side_length {
+                    // Check the next one just in case.
+                    eprint!("|{} ", mat[next_idx]);
+                }
+                assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
+            }
+            eprintln!("");
+        }
+    }
+
+    #[test]
+    fn test_emplace_timing_and_finder_patterns() {
+        // Version 1 has a 21 x 21 square matrix
+        let version = 1;
+        let side_length = (version - 1) * 4 + 21;
+        assert_eq!(side_length, 21);
+        // Construct a square matrix
+        let mut sq_matrix = SquareMatrix::new(side_length);
+        assert_eq!(sq_matrix.side_length(), 21);
+
+        emplace_timing_patterns(&mut sq_matrix);
+        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version);
+        let (mat, _side_length) = sq_matrix.destructure_into_bytes();
+        let expect: [u8; 441] = [
+            // x = timing-pattern column/row.
+            //                x //                   //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, // x
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, //
+            // --
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            //--
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, //
+        ];
+
+        for i in 0..side_length {
+            for j in 0..side_length {
+                let idx = i * side_length + j;
+                // On a failure it should print out at least a -few- items to stdout.
+                eprint!("{}", mat[idx]);
+
+                let next_idx = i * side_length + j + 1;
+
+                if next_idx < side_length * side_length {
+                    // Check the next one just in case.
+                    eprint!("|{} ", mat[next_idx]);
+                }
+                assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
+            }
+            eprintln!();
+        }
+    }
+
+    #[test]
+    fn test_alignment_centers_single_pointer() {
+        // Version 2
+        let t1 = ALIGNMENT_BLOCK_CENTERS[1];
+        let t2 = ALIGNMENT_BLOCK_CENTERS[1];
+
+        let i1 = t1.inner();
+        let i2 = t2.inner();
+        assert!(std::ptr::eq(i1, i2));
+    }
+
+    #[test]
+    fn test_emplace_timing_finder_alignment_patterns() {
+        // Version 2 has a 21 x 21 square matrix
+        let version = 2;
+        let side_length = (version - 1) * 4 + 21;
+        assert_eq!(side_length, 25);
+        // Construct a square matrix
+        let mut sq_matrix = SquareMatrix::new(side_length);
+        assert_eq!(sq_matrix.side_length(), 25);
+
+        emplace_timing_patterns(&mut sq_matrix);
+        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version);
+        emplace_alignment_squares(&mut sq_matrix, version);
+        let (mat, _side_length) = sq_matrix.destructure_into_bytes();
+        let expect: [u8; 25 * 25] = [
+            // x = timing-pattern column/row.
+
+            // Finder ------- x --                             ----------------------
+            // 1  2  3  4  5 |6| 7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, // 0
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, // 1
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, // 2
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, // 3
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, // 4
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, // 5
+            //               | | Timing Column
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, // 6 x
+            //               | |
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, // 7
+            // Finder ------------                      Finder ----------------------
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 8
+            1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 9
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 10
+            1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 11
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 12
+            1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 13
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 14
+            1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 15
+            //                          // -- Alignment    |-  -  -  -  -|
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 16
+            // Finder -------------|
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, // 17
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, // 18
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, // 19
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 20
+            //                          // -- Alignment    |-  -  -  -  -|
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 21
+            1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 22
+            1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 23
+            1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 24
+        ];
+        //  // Finder ------------|
+
+        for i in 0..side_length {
+            for j in 0..side_length {
+                let idx = i * side_length + j;
+                // On a failure it should print out at least a -few- items to stdout.
+                eprint!("{}", mat[idx]);
+
+                let next_idx = i * side_length + j + 1;
+
+                if next_idx < side_length * side_length {
+                    // Check the next one just in case.
+                    eprint!("|{} ", mat[next_idx]);
+                }
+                assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
+            }
+            eprintln!();
+        }
+    }
+
+    // TODO: More QR tests, bring in test cases from online tools and just generate/compare based
+    // on pixels.
+    // It's a little untenable to test larger codes by hand.
 }
