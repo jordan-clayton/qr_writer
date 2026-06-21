@@ -1,10 +1,23 @@
+use crate::ecc::ECCLevel;
 use crate::tables::*;
 use bitvec::prelude::*;
+
+// https://www.thonky.com/qr-code-tutorial/format-version-information#the-mask-pattern-bits
+// TODO: move these constants somewhere sensible
+const FORMAT_INFO_POLYNOMIAL: usize = 0x537;
+const FORMAT_INFO_MASK_PATTERN: usize = 0x5412;
+// The quiet zone needs to be at least 4 modules around the matrix
+const QUIET_ZONE_SIZE: usize = 4;
+
+const MAX_NUM_MASK_PATTERNS: usize = 8;
+
 // NOTE TO SELF: matrices work in units of "modules" (using m to denote).
 // These are similar to the concept of a "texel" or a matrix cell.
 
 // Module side length, s: (((v-1) * 4) + 21), where v is the version (1-indexed)
 // e.g Version 32: (((32 - 1) * 4) + 21) = 145m
+
+// Future TODO: Version, Mask hints to allow a user to try picking a mask/version pattern.
 
 // Drawing order
 // 1. Timing        *Done
@@ -12,11 +25,38 @@ use bitvec::prelude::*;
 //  2_i. Separator  *Done
 //  2_ii. Dark bit  *Done
 // 3. Alignment     * Done
-// 4. Version / Format:
-//  4i. Version/Format can be drawn in either order.
+// ----
+// 4. Version (if applicable)
+//  4_i. Version/Format can be drawn in either order, but masking makes things very complicated.
+//  4_ii. This is another reed_solomon, but it can be done on a much smaller scale.
+// ----
+// 5. Prepare for Masking:
+//      5_i Make 8 clones (yes, 8) -> one for each mask type to pick from based on the penalty algorithm
+//      5_ii Skip the clone(TODO: Hints)
+//
+//      Note: The specification is unclear about whether the format/version information
+//      should be written before/after the data bits
+//
+//      The specification says that it considers the full glyph, which seems to imply that
+//      version and format bits -should- be written beforehand.
+//      ZX/rxing both write the version + format areas -before- running the penalty algorithm.
+//
+//      -- Only Data bits get masked.
+//      -- The Mask pattern gets added (XOR) into the Format bitstring before being written into
+//      the code.
+//
+// 6. For each mask version (or one if chosen):
+//  6_i. Write the Format bits.
+//  6_ii. Write the data bits.
+//
+// 7. Run the penalty algorithm and pick the best code (unless mask hint supplied -- not yet
+//    implemented)
+//
+//    7_i. The "best" code is the one with the lowest penalty score.
+//
+// 8. Add the quiet zone.
+//
 
-// Technically this does not matter, really,
-// but for reference:
 // WHITE MODULE = 0 = false
 // BLACK MODULE = 1 = true
 #[derive(Copy, Clone, Debug)]
@@ -27,7 +67,9 @@ pub(crate) enum Module {
     Separator,
     Timing(bool),
     Alignment(bool),
+    // Encoding Error level + mask
     Format(bool),
+    // For V7 and greater
     Version(bool),
     Dark,
 }
@@ -43,6 +85,26 @@ impl Module {
             Self::Version(inner) => inner,
             Self::Dark => true,
             Self::Separator => false,
+        }
+    }
+
+    // TODO: determine whether to leave this.
+    pub(crate) fn complement(&mut self) {
+        match self {
+            Self::Writable(inner) => *inner = !*inner,
+            Self::Finder(inner) => *inner = !*inner,
+            Self::Timing(inner) => *inner = !*inner,
+            Self::Alignment(inner) => *inner = !*inner,
+            Self::Format(inner) => *inner = !*inner,
+            Self::Version(inner) => *inner = !*inner,
+            Self::Dark => *self = Self::Separator,
+            Self::Separator => *self = Self::Dark,
+        }
+    }
+
+    pub(crate) fn xor(&mut self, mask: bool) {
+        if let Self::Writable(inner) = self {
+            *inner ^= mask;
         }
     }
     pub(crate) fn writable(&self) -> bool {
@@ -86,12 +148,23 @@ impl Default for Module {
 
 // NOTE: this could be re-implemented as a 1d bitfield.
 // Swap once the api is figured out -> bool => load_be()
-pub(crate) struct SquareMatrix {
-    data: Vec<Module>,
+// NOTE: the "bytes" in this matrix as "pixels" are 1-minus in module mode.
+// When exporting as an image, treat like a texture and sample it.
+//
+// Current intention is to export QR as square only.
+#[derive(Clone, Debug)]
+pub(crate) struct SquareMatrix<T>
+where
+    T: Clone + std::fmt::Debug + Default,
+{
+    data: Vec<T>,
     side_length: usize,
 }
 
-impl SquareMatrix {
+impl<T> SquareMatrix<T>
+where
+    T: Clone + std::fmt::Debug + Default,
+{
     // VERSION IS SUPPLIED 1-indexed
     pub(crate) fn new(n: usize) -> Self {
         // Create an empty all-black matrix that's fully writable.
@@ -107,13 +180,46 @@ impl SquareMatrix {
     }
     // Returns the actual module cell (which holds state)
     // use .inner() to determine the value (white = false/black = true)
-    pub(crate) fn get(&self, i: usize, j: usize) -> &Module {
+    pub(crate) fn get(&self, i: usize, j: usize) -> &T {
         &self.data[self.side_length * i + j]
     }
-    pub(crate) fn get_mut(&mut self, i: usize, j: usize) -> &mut Module {
+    pub(crate) fn get_mut(&mut self, i: usize, j: usize) -> &mut T {
         &mut self.data[self.side_length * i + j]
     }
+}
 
+// This will probably go unused.
+impl SquareMatrix<u8> {
+    // This might go unused, but could be helpful.
+    pub(crate) fn complement(mut self) -> Self {
+        self.data.iter_mut().for_each(|b| {
+            *b ^= 0xFF;
+            *b &= 0x01;
+        });
+        self
+    }
+
+    pub(crate) fn destructure_into_bytes(self) -> (Vec<u8>, usize) {
+        let side_length = self.side_length;
+        let mat = self.data;
+        (mat, side_length)
+    }
+
+    // This might be handled elsewhere, but can be used for re-interpolating
+    // a QR (in texels/modules) into larger squares.
+    pub(crate) fn sample_matrix(&self, i: usize, j: usize, img_side_length: usize) -> u8 {
+        // Get the normalized coordinates.
+        let u = (j + 1) as f32 / img_side_length as f32;
+        let v = (i + 1) as f32 / img_side_length as f32;
+
+        let tex_u = ((self.side_length - 1) as f32 * u) as usize;
+        let tex_v = ((self.side_length - 1) as f32 * v) as usize;
+        *self.get(tex_v, tex_u)
+    }
+}
+
+// This could expose a complement, but the semantic Module information doesn't map 1:1
+impl SquareMatrix<Module> {
     // Returns a vector of u8 (booleans cast to u8) and the side length.
     // This is mostly used for testing and may have to change if/when swapping to a bitfield.
     pub(crate) fn destructure_into_bytes(self) -> (Vec<u8>, usize) {
@@ -124,32 +230,96 @@ impl SquareMatrix {
 }
 
 pub(crate) struct QRCodeMatrix {
-    matrix: SquareMatrix,
+    matrix: SquareMatrix<Module>,
     version: usize,
+    ecc_level: ECCLevel,
 }
 
 impl QRCodeMatrix {
     // Let the drawing routine happen in the constructor.
-    pub(crate) fn new(version: usize, codewords: &BitVec<u8, Msb0>) -> Self {
-        let matrix = draw_qr_code(version, codewords);
-        Self { matrix, version }
+    // TODO: add a mask hint + version hints.
+    pub(crate) fn new(codewords: &BitVec<u8, Msb0>, version: usize, ecc_level: ECCLevel) -> Self {
+        let matrix = draw_qr_code(codewords, version, ecc_level);
+        Self {
+            matrix,
+            version,
+            ecc_level,
+        }
     }
     pub(crate) fn version(&self) -> usize {
         self.version
     }
-    pub(crate) fn matrix(&self) -> &SquareMatrix {
+    pub(crate) fn ecc_level(&self) -> ECCLevel {
+        self.ecc_level
+    }
+
+    // This likely has very little practical use.
+    pub(crate) fn matrix(&self) -> &SquareMatrix<Module> {
         &self.matrix
+    }
+
+    // TODO: determine whether to resample in the render.
+    // Or do it later on export.
+    pub(crate) fn render(&self) -> SquareMatrix<u8> {
+        let old_matrix = self.matrix();
+        let old_side_length = old_matrix.side_length();
+
+        let new_side_length = old_side_length + QUIET_ZONE_SIZE;
+        let mut mat = vec![1; new_side_length * new_side_length];
+        for i in 0..old_side_length {
+            for j in 0..old_side_length {
+                // Black = 0, white = 1 -> just write the complement.
+                mat[(i + QUIET_ZONE_SIZE) * new_side_length + (j + QUIET_ZONE_SIZE)] =
+                    !(old_matrix.get(i, j).inner()) as u8;
+            }
+        }
+
+        // This matrix (u8) can be complemented if there's a bug or a desire to take 1-s complement.
+        SquareMatrix {
+            data: mat,
+            side_length: new_side_length,
+        }
     }
 }
 
 // White module = 0 = false
 // Black module = 1 = true
-fn draw_qr_code(version: usize, codewords: &BitVec<u8, Msb0>) -> SquareMatrix {
+fn draw_qr_code(
+    codewords: &BitVec<u8, Msb0>,
+    version: usize,
+    ecc_level: ECCLevel,
+) -> SquareMatrix<Module> {
     let n = (version - 1) * 4 + 21;
     let mut matrix = SquareMatrix::new(n);
 
     emplace_timing_patterns(&mut matrix);
+    // TODO: rename -> just emplace_finder_patterns is fine.
+    // No longer need to write it before timing.
     emplace_finder_patterns_into_blank_matrix(&mut matrix, version);
+    emplace_alignment_squares(&mut matrix, version);
+
+    // Write version data -> this can be done before embedding the version information.
+    if version >= 7 {
+        emplace_version_information(&mut matrix, version);
+    }
+
+    // FUTURE TODO: modify this to respect a mask hint
+    let mut candidates = Vec::with_capacity(MAX_NUM_MASK_PATTERNS);
+    candidates.push(matrix);
+    // Make 6 more copies.
+    for i in 1..MAX_NUM_MASK_PATTERNS {
+        candidates.push(candidates[0].clone())
+    }
+
+    for (i, candidate) in candidates.iter_mut().enumerate() {
+        let mask_pattern = i
+            .try_into()
+            .expect("u8 into mask patterns is limited to [0-7] and should cast 1:1");
+        // Write format information
+        emplace_format_information_area(candidate, ecc_level, mask_pattern);
+        // Write the data bits
+        emplace_data_bits(candidate, codewords, mask_pattern);
+    }
 
     todo!("Implement rest of QR drawing routine");
 }
@@ -159,7 +329,7 @@ fn draw_qr_code(version: usize, codewords: &BitVec<u8, Msb0>) -> SquareMatrix {
 // Since this -technically- doesn't need to happen before the other elements,
 // this will not hard-assert.
 // It's wiser to draw the timing before drawing the finder pattern though.
-pub(crate) fn emplace_timing_patterns(matrix: &mut SquareMatrix) {
+pub(crate) fn emplace_timing_patterns(matrix: &mut SquareMatrix<Module>) {
     let side_length = matrix.side_length();
     // Technically this can work on all matrices of side length 6 or greater, but
     // since this is for qr only, go with the minimum side length for a QR code.
@@ -222,7 +392,10 @@ const MAX_SIDE_SEPARATOR_OFFSET: usize = MAX_SIDE_SEPARATOR_BITS - 1;
 //
 // After emplacing the finder patterns, this also emplaces the separators and the dark bit
 // (both are part of the finder pattern)
-pub(crate) fn emplace_finder_patterns_into_blank_matrix(matrix: &mut SquareMatrix, version: usize) {
+pub(crate) fn emplace_finder_patterns_into_blank_matrix(
+    matrix: &mut SquareMatrix<Module>,
+    version: usize,
+) {
     // The QR version 1 (the minimum) has side length 21
     assert!(matrix.side_length() >= 21);
 
@@ -318,7 +491,7 @@ impl Direction {
 pub(crate) fn emplace_white_finder_pattern_into_blank_matrix(
     i0: usize,
     j0: usize,
-    matrix: &mut SquareMatrix,
+    matrix: &mut SquareMatrix<Module>,
 ) {
     // Index pointers
     let mut i = i0;
@@ -375,7 +548,11 @@ pub(crate) fn emplace_white_finder_pattern_into_blank_matrix(
 }
 
 // This is used to encode the state of the module cell to make zig-zagging a little bit easier.
-fn emplace_black_finder_pattern_into_blank_matrix(i0: usize, j0: usize, matrix: &mut SquareMatrix) {
+fn emplace_black_finder_pattern_into_blank_matrix(
+    i0: usize,
+    j0: usize,
+    matrix: &mut SquareMatrix<Module>,
+) {
     for i in i0..i0 + MAX_SIDE_BLACK_FINDER_BITS {
         for j in j0..j0 + MAX_SIDE_BLACK_FINDER_BITS {
             let module = matrix.get_mut(i, j);
@@ -400,7 +577,7 @@ fn emplace_separator_bits(
     tl_bl: (usize, usize),
     bl_tl: (usize, usize),
     tr_br: (usize, usize),
-    matrix: &mut SquareMatrix,
+    matrix: &mut SquareMatrix<Module>,
 ) {
     // TOP LEFT, (top left corner should be (0, 0))
     // Traversal is: (right, up)
@@ -571,7 +748,7 @@ fn emplace_separator_bits(
 }
 
 // Lookups: version - 1;
-pub(crate) fn emplace_alignment_squares(matrix: &mut SquareMatrix, version: usize) {
+pub(crate) fn emplace_alignment_squares(matrix: &mut SquareMatrix<Module>, version: usize) {
     // Escape early if it's version one, there are no alignment squares to place.
     if version == 1 {
         return;
@@ -649,7 +826,7 @@ impl<'a> IntoIterator for &'a Corners {
 }
 
 const ALIGNMENT_CENTRE_OFFSET: usize = 2;
-pub(crate) fn can_write_alignment_square(corners: &Corners, matrix: &SquareMatrix) -> bool {
+pub(crate) fn can_write_alignment_square(corners: &Corners, matrix: &SquareMatrix<Module>) -> bool {
     for &(i, j) in corners {
         let module = matrix.get(i, j);
         // If we can write an alignment square at each of the 4 corners, then we can write an
@@ -664,7 +841,7 @@ pub(crate) fn can_write_alignment_square(corners: &Corners, matrix: &SquareMatri
 pub(crate) fn write_alignment_square(
     from: (usize, usize),
     to: (usize, usize),
-    matrix: &mut SquareMatrix,
+    matrix: &mut SquareMatrix<Module>,
 ) {
     let mut p = 0;
     for i in from.0..=to.0 {
@@ -686,4 +863,135 @@ fn get_alignment_module_value(acc: usize) -> bool {
     // Hopefully this compiles to a LUT.
     // If speed is ever an issue, consider making a LUT in tables.rs.
     !([6, 7, 8, 11, 13, 16, 17, 18].contains(&acc))
+}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub(crate) enum MaskPattern {
+    Zero,
+    One,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+}
+
+impl MaskPattern {
+    // This should be called on a writable/data area
+    // Applies the masking rule to suggest whether to flip the bit at (row, column).
+    pub(crate) fn should_mask(&self, row: usize, column: usize) -> bool {
+        match self {
+            // (row + column) mod 2 == 0
+            Self::Zero => (row + column) & 1 != 1,
+            // (row) mod 2 == 0
+            Self::One => row & 1 != 1,
+            // (column) mod 3 == 0
+            Self::Two => column.rem_euclid(3) == 0,
+            // (row + column) mod 3 == 0
+            Self::Three => (row + column).rem_euclid(3) == 0,
+            // (floor(row / 2) + floor(column / 3) ) mod 2 == 0
+            Self::Four => ((row >> 1) + (column / 3)) & 1 != 1,
+            // (row * column) mod 2 + (row * column) mod 3 == 0
+            Self::Five => (row * column).rem_euclid(2) + (row * column).rem_euclid(3) == 0,
+            // ((row * column) mod 2 + (row * column) mod 3) mod 2 == 0
+            Self::Six => ((row * column).rem_euclid(2) + (row * column).rem_euclid(3)) & 1 != 1,
+            // ((row + PLUS column) mod 2 + (row * column) mod 3) mod 2 == 0
+            Self::Seven => ((row + column).rem_euclid(2) + (row * column).rem_euclid(3)) & 1 != 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for MaskPattern {
+    type Error = ();
+    fn try_from(n: u8) -> Result<Self, Self::Error> {
+        match n {
+            0 => Ok(Self::Zero),
+            1 => Ok(Self::One),
+            2 => Ok(Self::Two),
+            3 => Ok(Self::Three),
+            4 => Ok(Self::Four),
+            5 => Ok(Self::Five),
+            6 => Ok(Self::Six),
+            7 => Ok(Self::Seven),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<MaskPattern> for u8 {
+    fn from(m: MaskPattern) -> Self {
+        match m {
+            MaskPattern::Zero => 0,
+            MaskPattern::One => 1,
+            MaskPattern::Two => 2,
+            MaskPattern::Three => 3,
+            MaskPattern::Four => 4,
+            MaskPattern::Five => 5,
+            MaskPattern::Six => 6,
+            MaskPattern::Seven => 7,
+        }
+    }
+}
+
+impl TryFrom<usize> for MaskPattern {
+    type Error = ();
+    fn try_from(n: usize) -> Result<Self, Self::Error> {
+        match n {
+            0 => Ok(Self::Zero),
+            1 => Ok(Self::One),
+            2 => Ok(Self::Two),
+            3 => Ok(Self::Three),
+            4 => Ok(Self::Four),
+            5 => Ok(Self::Five),
+            6 => Ok(Self::Six),
+            7 => Ok(Self::Seven),
+            _ => Err(()),
+        }
+    }
+}
+
+// Needs to encircle the top left finder but not overlap the timing
+// Bottom left format: bits are written under the dark bit down to the bottom.
+// (i.e.) column to the right of the bottom left finder, 1 module right of the separator.
+//
+// Top Right format: bits are reserved under the format square, 1 below the separator row.
+pub(crate) fn emplace_format_information_area(
+    matrix: &mut SquareMatrix<Module>,
+    ecc_level: ECCLevel,
+    mask_pattern: MaskPattern,
+) {
+    let ecc_bits = ecc_level.ecc_bits_for_format_string();
+
+    // NOTE: these can be computed at compile time in tables.rs
+    // Similarly, they can be kung-fu copy pasted from thonky.
+    // TODO: migrate this logic and precompute the tables.
+
+    // This can at most have 3 bits in length
+    let mask_pattern_bits: u8 = mask_pattern.into();
+    let format_string = (ecc_bits << 3) | mask_pattern_bits;
+    assert_eq!(format_string.leading_zeros(), 3);
+
+    // 5-bit format string
+    todo!("Implement format information area.");
+}
+
+// Adjacent to the bottom left and top right finder.
+//
+// (i: 3 x j: 6) version information block above bottom left,
+// (i: 6 x j: 3) version information to the left of the top right.
+pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, version: usize) {
+    // NOTE: Like the format info strings, these can be precomputed at compile time
+    // (or kung-fu copy-pasted from thonky).
+
+    todo!("Implement emplace version information");
+}
+
+pub(crate) fn emplace_data_bits(
+    candidate: &mut SquareMatrix<Module>,
+    codewords: &BitVec<u8, Msb0>,
+    mask_pattern: MaskPattern,
+) {
+    todo!("Implement drawing routine.");
 }

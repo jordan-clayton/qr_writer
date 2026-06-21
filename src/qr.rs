@@ -63,7 +63,10 @@ pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> QRCodeMatrix {
             .all(|b| b == false)
     );
 
-    QRCodeMatrix::new(version, &bitfield)
+    // The rest of the algorithm is driven by the work in matrix.rs
+    // NOTE: this does not render the QR code into a final bitfield.
+    // call QRCode::render()
+    QRCodeMatrix::new(&bitfield, version, ecc_level)
 }
 
 // TODO: seriously consider a series of structs to carry the data over tuple structs.
