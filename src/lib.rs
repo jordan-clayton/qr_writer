@@ -365,6 +365,84 @@ mod tests {
         assert_eq!(generator_coefficients, expect_coeffs);
     }
 
+    // TODO: TESTS FOR VERSION AND FORMAT STRINGS - COMPARE WITH KNOWN STRINGS FROM REFERENCE TABLE.
+    #[test]
+    fn test_sample_format_strings() {
+        // Indexing: ecc.capacity_idx * 8 + mask idx
+
+        // L: 0, 4, 7
+        let masks = [0usize, 4, 7];
+
+        let l_strings = masks
+            .iter()
+            .map(|&m| FORMAT_INFO_STRINGS[m])
+            .collect::<Vec<_>>();
+        let expected_l_strings = [0b111011111000100, 0b110011000101111, 0b110100101110110];
+        assert_eq!(l_strings, expected_l_strings, "L-String failure.");
+
+        // M: 0, 4, 7
+        let m_strings = masks
+            .iter()
+            .map(|&m| FORMAT_INFO_STRINGS[1 * 8 + m])
+            .collect::<Vec<_>>();
+
+        let expected_m_strings = [0b101010000010010, 0b100010111111001, 0b100101010100000];
+        assert_eq!(m_strings, expected_m_strings, "M-String failure.");
+        // Q: 0, 4, 7
+
+        let q_strings = masks
+            .iter()
+            .map(|&m| FORMAT_INFO_STRINGS[2 * 8 + m])
+            .collect::<Vec<_>>();
+
+        let expected_q_strings = [0b011010101011111, 0b010010010110100, 0b010101111101101];
+
+        assert_eq!(q_strings, expected_q_strings, "Q-String Failure.");
+        // H: 0, 4, 7
+        let h_strings = masks
+            .iter()
+            .map(|&m| FORMAT_INFO_STRINGS[3 * 8 + m])
+            .collect::<Vec<_>>();
+
+        let expected_h_strings = [0b001011010001001, 0b000011101100010, 0b000100000111011];
+        assert_eq!(h_strings, expected_h_strings, "H-String Failure.");
+    }
+
+    #[test]
+    fn test_sample_version_strings() {
+        // Like above, do a 12-sample of the version information strings
+        // Indexing: version (counting from 1) - 7;
+
+        // every 3rd string.
+        let versions = [
+            7, 10, 13, 16, //
+            19, 22, 25, 28, //
+            31, 34, 37, 40, //
+        ];
+
+        let version_strings = versions
+            .iter()
+            .map(|&v| VERSION_INFO_STRINGS[v - 7])
+            .collect::<Vec<_>>();
+
+        let expected_version_strings = [
+            0b000111110010010100, // 7
+            0b001010010011010011, // 10
+            0b001101100001000111, // 13
+            0b010000101101111000, // 16
+            0b010011010100110010, // 19
+            0b010110100011001001, // 22
+            0b011001000111100001, // 25
+            0b011100110000011010, // 28
+            0b011111001001010000, // 31
+            0b100010100010111010, // 34
+            0b100101010000101110, // 37
+            0b101000110001101001, // 40
+        ];
+
+        assert_eq!(version_strings, expected_version_strings);
+    }
+
     #[test]
     fn test_reed_solomon() {
         // Taken from: https://www.thonky.com/qr-code-tutorial/error-correction-coding#step-8-generating-error-correction-codewords
@@ -549,12 +627,25 @@ mod tests {
 
     // NOTE: this test will eventually need to be iterated on
     // For now, use it to ensure normal execution up to the next todo!().
+    // // This test is not fully completed -> just comment/modify what's necessary to reflect the
+    // state of the program.
     #[test]
     fn test_encode_qr() {
         // Alphanumeric, version 1, ecc level Q
         let data = "HELLO WORLD";
 
-        let encoded = encode_qr(data, ECCLevel::Q);
+        // Note -> this doesn't emplace spaces between each "HELLO WORLD"
+        // The v7_string should be:
+        // HELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLD
+        // -> test this with existing online encoders and compare by inspection until the full
+        // implementation is complete and can be automated.
+        let v7_test = data.repeat(11);
+        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+
+        assert_eq!(v7_version, 7);
+
+        // let encoded = encode_qr(data, ECCLevel::Q);
+        let encoded = encode_qr(&v7_test, ECCLevel::Q);
 
         todo!("Encode matrix for comparison.");
     }
@@ -601,18 +692,9 @@ mod tests {
         for i in 0..side_length {
             for j in 0..side_length {
                 let idx = i * side_length + j;
-                // On a failure it should print out at least a -few- items to stdout.
-                eprint!("{}", mat[idx]);
-
                 let next_idx = i * side_length + j + 1;
-
-                if next_idx < side_length * side_length {
-                    // Check the next one just in case.
-                    eprint!("|{} ", mat[next_idx]);
-                }
                 assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
             }
-            eprintln!("");
         }
     }
 
@@ -660,18 +742,11 @@ mod tests {
         for i in 0..side_length {
             for j in 0..side_length {
                 let idx = i * side_length + j;
-                // On a failure it should print out at least a -few- items to stdout.
-                eprint!("{}", mat[idx]);
 
                 let next_idx = i * side_length + j + 1;
 
-                if next_idx < side_length * side_length {
-                    // Check the next one just in case.
-                    eprint!("|{} ", mat[next_idx]);
-                }
                 assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
             }
-            eprintln!();
         }
     }
 
@@ -742,18 +817,9 @@ mod tests {
         for i in 0..side_length {
             for j in 0..side_length {
                 let idx = i * side_length + j;
-                // On a failure it should print out at least a -few- items to stdout.
-                eprint!("{}", mat[idx]);
 
-                let next_idx = i * side_length + j + 1;
-
-                if next_idx < side_length * side_length {
-                    // Check the next one just in case.
-                    eprint!("|{} ", mat[next_idx]);
-                }
                 assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
             }
-            eprintln!();
         }
     }
 

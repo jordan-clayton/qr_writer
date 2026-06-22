@@ -1,3 +1,7 @@
+use std::num::NonZero;
+// TODO: factor out the magic numbers
+//  - Either re-use semantic constants or duplicate them here.
+
 pub(crate) const BIT_LENGTH: [u8; 12] = [
     10, 12, 14, // NUMERIC
     9, 11, 13, // ALPHANUMERIC
@@ -1270,3 +1274,142 @@ pub(crate) const ALIGNMENT_BLOCK_CENTERS: [AlignmentCenters; 40] = [
     AlignmentCenters::Seven(&[6, 26, 54, 82, 110, 138, 166]), // Version 39
     AlignmentCenters::Seven(&[6, 30, 58, 86, 114, 142, 170]), // Version 40
 ];
+
+// https://www.thonky.com/qr-code-tutorial/format-version-information#the-mask-pattern-bits
+const FORMAT_INFO_POLYNOMIAL: usize = 0x537;
+const FORMAT_INFO_MASK_PATTERN: u16 = 0x5412;
+
+// ------- Format Strings (15 bits: 5 bit level + mask + 10 bits of ECC)
+// total table size: # ECC modes: 4 * # Mask patterns: 8 => 32
+// Index by: ecc_capacity_idx() * 8 + mask_pattern_idx()
+pub(crate) const FORMAT_INFO_STRINGS: [u16; 32] = compute_format_information_strings();
+
+// TODO: factor out the BCH division.
+// => it works generically over polynomials.
+const fn compute_format_information_strings() -> [u16; 32] {
+    // 15-bitlong bitmask -> this might not be needed?
+    // Remove if not important.
+    const BITSTRING_MASK: u16 = 0x7FFF;
+    // 10-bit long bitmask
+    const ECC_MASK: u16 = 0x3FF;
+    // Two bits that specify ecc level
+    // This information is also accessible in the API by method on ECCLevel
+    // [L, M, Q, H]
+    let ec_bits: [u32; 4] = [1, 0, 3, 2];
+    let mut i = 0;
+    let mut j = 0usize;
+    let mut format_strings = [0; 32];
+
+    // Something is incredibly weird here.
+    while i < ec_bits.len() {
+        while j < 8 {
+            let err_level = ec_bits[i];
+            let mask_pattern = j as u32;
+
+            // Create a 5 bit format string
+            let format_string = (err_level << 3) | mask_pattern;
+            // Sanity check -> this should be, at most, 5 bits in length.
+            // Note: it can have fewer than 5 bits, per ec_bits[].
+            let f_msb = find_msb(format_string);
+            assert!(f_msb <= 5);
+            // Make sure the format string is within range of proper values.
+            // The maximum value = 0b11111 = 1F.
+            assert!(format_string <= 0x1F);
+
+            // Compute the error string
+
+            let err_string = compute_bch(
+                format_string,
+                NonZero::new(FORMAT_INFO_POLYNOMIAL as u32)
+                    .expect("Nonzero polynomial should be, in-fact, nonzero."),
+            );
+            // The 10 bits of the error string here are the remainder.
+            // Mask them off from the quotient | remainder in the err_string.
+            let mut bitstring: u16 =
+                ((format_string as u16) << 10) | ((err_string as u16) & ECC_MASK);
+
+            // Mask it off to 15 bits --> or possibly assert 1 leading zero -> this needs to be
+            // tested.
+            bitstring &= BITSTRING_MASK;
+
+            // Sanity check -> ensure that it's up to 15 bits in length
+            let b_msb = find_msb(bitstring as u32);
+            // NOTE: it can be fewer than 10 if the division remainder doesn't have msb @ 10.
+            assert!(b_msb <= 15);
+
+            // Add the bitstring to the bitstring array XOR-ed with the mask pattern
+            format_strings[i * 8 + j] = bitstring ^ (FORMAT_INFO_MASK_PATTERN as u16);
+            j += 1;
+        }
+        i += 1;
+
+        // Reset j's index
+        j = 0;
+    }
+
+    assert!(i == 4);
+
+    format_strings
+}
+
+pub(crate) const fn find_msb(n: u32) -> u32 {
+    32 - n.leading_zeros()
+}
+
+const fn compute_bch(val: u32, poly: NonZero<u32>) -> u32 {
+    let mut val = val;
+    let poly = poly.get();
+
+    let msb_poly = find_msb(poly as u32);
+
+    // Shift the err_string such that the final bits
+    // (10 for Format) are the remainder
+    val <<= msb_poly.saturating_sub(1);
+
+    // Perform the division loop.
+    while find_msb(val) >= msb_poly {
+        val ^= (poly as u32) << (find_msb(val).saturating_sub(msb_poly));
+    }
+
+    val
+}
+
+// ------- VERSION STRINGS (18 bits: 6 bit version binary + 12 bits of ECC)
+
+// For versions 7-40
+// Index via: version (counting from 1) - 7 => [0..=33]
+const VERSION_INFO_POLYNOMIAL: usize = 0x1F25;
+pub(crate) const VERSION_INFO_STRINGS: [u32; 34] = compute_version_information_strings();
+
+const fn compute_version_information_strings() -> [u32; 34] {
+    // 12 bits (ECC code)
+    const VER_MASK: u32 = 0xFFF;
+    // 18 bits
+    const BITSTRING_MASK: u32 = 0x3FFFF;
+    let mut version_strings = [0; 34];
+    let mut i = 0;
+    while i < 34 {
+        let version = i as u32 + 7;
+        // Sanity check: ensure 6 bits or fewer.
+        assert!(find_msb(version) <= 6);
+        let version_ecc = compute_bch(
+            version,
+            NonZero::new(VERSION_INFO_POLYNOMIAL as u32)
+                .expect("Nonzero polynomial should, in fact, be nonzero"),
+        );
+
+        // The remainder is 12-bits long
+        let mut version_string = (version << 12) | (version_ecc & VER_MASK);
+        version_string &= BITSTRING_MASK;
+
+        // Sanity check: make sure it's within the range of 15-18 bits in length
+        // 000111 + 12 bits = 15 bits is the minimum.
+        let v_msb = find_msb(version_string);
+        assert!(v_msb >= 15 && v_msb <= 18);
+
+        version_strings[i] = version_string;
+        i += 1;
+    }
+
+    version_strings
+}

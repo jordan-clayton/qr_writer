@@ -26,6 +26,7 @@ pub(crate) const REM: usize = FIELD_SIZE - 1;
 // "x" is the polynomial variable.
 // g(x) = (x + a^b)(x + a^(b + 1))...(x + a^(b + 2t - 1)))
 pub(crate) const GENERATOR_BASE: usize = 0;
+
 const fn compute_gf_256_log_tables() -> ([usize; FIELD_SIZE], [usize; FIELD_SIZE]) {
     let mut exp = [0usize; FIELD_SIZE];
     let mut log = [0usize; FIELD_SIZE];
@@ -42,7 +43,9 @@ const fn compute_gf_256_log_tables() -> ([usize; FIELD_SIZE], [usize; FIELD_SIZE
     (exp, log)
 }
 
-// Loops and iterators aren't stable yet in constant evaluation.
+// CLEANUP TODO: apparently while-loops are legal in constant functions as of 2018
+// Refactor the recursion into iteration and remove the recursion limit increase.
+// Iterators aren't stable yet in constant evaluation.
 // 256 is a small enough size that the recursion should be fine if the limit is bumped.
 // See: lib.rs; recursion limit is currently set to 512.
 const fn fill_exp_rec(exp: &mut [usize; FIELD_SIZE], mut x: usize, i: usize) {

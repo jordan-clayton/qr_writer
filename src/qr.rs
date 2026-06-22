@@ -91,8 +91,19 @@ pub(crate) fn prepare_qr_codewords(data: &str, ecc_level: ECCLevel) -> (Vec<u8>,
     // Compute error correction codewords
     let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&bytes, &data_blocks, ec_bytes);
 
+    // Max number of data bytes = max(group1 data bytes, group2 data bytes)
+    let max_data_bytes_per_block = NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_1[idx]
+        .max(NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_2[idx]) as usize;
+
     // Perform the interleaving and return
-    let interleaved = interleave_codewords(&bytes, &data_blocks, &ecc_bytes, &ecc_blocks);
+    let interleaved = interleave_codewords(
+        &bytes,
+        &data_blocks,
+        &ecc_bytes,
+        &ecc_blocks,
+        max_data_bytes_per_block,
+        ec_bytes,
+    );
     (interleaved, version, ecc_level)
 }
 
@@ -695,18 +706,28 @@ fn interleave_codewords(
     data_blocks: &[Block],
     ecc_bytes: &[u8],
     ecc_blocks: &[Block],
+    // These can be looked up.
+    max_data_bytes_per_block: usize,
+    ec_bytes_per_block: usize,
 ) -> Vec<u8> {
     let mut interleave = Vec::with_capacity(data.len() + ecc_blocks.len());
-
-    for byte_offset in 0..data.len() {
+    // Codes with multiple groups have different numbers of bytes per block.
+    for byte_offset in 0..max_data_bytes_per_block {
         for block in data_blocks {
-            interleave.push(data[block.start_idx() + byte_offset]);
+            let data_idx = block.start_idx() + byte_offset;
+            // If it's -in- the range of the block, we write it.
+            if data_idx <= block.end_idx() {
+                interleave.push(data[data_idx]);
+            }
         }
     }
 
-    for byte_offset in 0..ecc_bytes.len() {
+    for byte_offset in 0..ec_bytes_per_block {
         for block in ecc_blocks {
-            interleave.push(ecc_bytes[block.start_idx() + byte_offset]);
+            let data_idx = block.start_idx() + byte_offset;
+            if data_idx <= block.end_idx() {
+                interleave.push(ecc_bytes[data_idx]);
+            }
         }
     }
 

@@ -2,10 +2,6 @@ use crate::ecc::ECCLevel;
 use crate::tables::*;
 use bitvec::prelude::*;
 
-// https://www.thonky.com/qr-code-tutorial/format-version-information#the-mask-pattern-bits
-// TODO: move these constants somewhere sensible
-const FORMAT_INFO_POLYNOMIAL: usize = 0x537;
-const FORMAT_INFO_MASK_PATTERN: usize = 0x5412;
 // The quiet zone needs to be at least 4 modules around the matrix
 const QUIET_ZONE_SIZE: usize = 4;
 
@@ -24,15 +20,15 @@ const MAX_NUM_MASK_PATTERNS: usize = 8;
 // 2. Finder        *Done
 //  2_i. Separator  *Done
 //  2_ii. Dark bit  *Done
-// 3. Alignment     * Done
+// 3. Alignment     *Done
 // ----
-// 4. Version (if applicable)
+// 4. Version (if applicable) *Done
 //  4_i. Version/Format can be drawn in either order, but masking makes things very complicated.
 //  4_ii. This is another reed_solomon, but it can be done on a much smaller scale.
 // ----
 // 5. Prepare for Masking:
-//      5_i Make 8 clones (yes, 8) -> one for each mask type to pick from based on the penalty algorithm
-//      5_ii Skip the clone(TODO: Hints)
+//      5_i Make 8 clones (yes, 8) -> one for each mask type to pick from based on the penalty algorithm *Done
+//      5_ii Skip the clone(TODO: Hints) *Done
 //
 //      Note: The specification is unclear about whether the format/version information
 //      should be written before/after the data bits
@@ -46,8 +42,8 @@ const MAX_NUM_MASK_PATTERNS: usize = 8;
 //      the code.
 //
 // 6. For each mask version (or one if chosen):
-//  6_i. Write the Format bits.
-//  6_ii. Write the data bits.
+//  6_i. Write the Format bits. *Done
+//  6_ii. Write the data bits. *TODO
 //
 // 7. Run the penalty algorithm and pick the best code (unless mask hint supplied -- not yet
 //    implemented)
@@ -306,10 +302,13 @@ fn draw_qr_code(
     // FUTURE TODO: modify this to respect a mask hint
     let mut candidates = Vec::with_capacity(MAX_NUM_MASK_PATTERNS);
     candidates.push(matrix);
-    // Make 6 more copies.
-    for i in 1..MAX_NUM_MASK_PATTERNS {
+    // Make 7 more copies (total 8).
+    for _i in 1..MAX_NUM_MASK_PATTERNS {
         candidates.push(candidates[0].clone())
     }
+
+    // Sanity check.
+    assert_eq!(candidates.len(), MAX_NUM_MASK_PATTERNS);
 
     for (i, candidate) in candidates.iter_mut().enumerate() {
         let mask_pattern = i
@@ -317,11 +316,43 @@ fn draw_qr_code(
             .expect("u8 into mask patterns is limited to [0-7] and should cast 1:1");
         // Write format information
         emplace_format_information_area(candidate, ecc_level, mask_pattern);
-        // Write the data bits
+
+        // TODO: remove this -> this is just for feedback when testing
+        #[cfg(debug_assertions)]
+        {
+            // Iterate and print the qr matrix as it looks (the drawing routine's not yet
+            // implemented, so it'll just crash).
+
+            // It's getting tricky to produce unit tests so this will have to do for now.
+            // Expect it to print out most of the matrix after crashing.
+            let side_length = candidate.side_length();
+            // Write into a string and just spit it out all at once.
+            // This code -will- be removed.
+            let mut out_string = String::with_capacity(2 * side_length * side_length);
+            for i in 0..side_length {
+                for j in 0..side_length {
+                    match candidate.get(i, j).inner() {
+                        // True = black => write an x.
+                        true => out_string.push('X'),
+                        // False = white.
+                        false => out_string.push('_'),
+                    }
+                    out_string.push(' ');
+                }
+
+                out_string.push('\n')
+            }
+            eprintln!("{out_string}");
+        }
+
+        // Write the data bits -> this is done by mutation, since it's faster to just
+        // preallocate all 8 matrices.
         emplace_data_bits(candidate, codewords, mask_pattern);
     }
 
-    todo!("Implement rest of QR drawing routine");
+    todo!("Implement the penalty algorithm and select the best candidate.");
+    // let candidate_idx = algo
+    // return candidates.remove(candidate_idx) -> pick the best one.
 }
 
 // ---- TIMING PATTERNS ---
@@ -441,9 +472,9 @@ pub(crate) fn emplace_finder_patterns_into_blank_matrix(
     // i.e. the dark bit is 1 cell to the right of the bottom left finder pattern's top right
     // corner.
 
-    const DARK_I: usize = 8;
-    let dark_j = version * 4 + 9;
-    let module = matrix.get_mut(DARK_I, dark_j);
+    const DARK_J: usize = 8;
+    let dark_i = version * 4 + 9;
+    let module = matrix.get_mut(dark_i, DARK_J);
     // Ensure we can write to the cell (i.e, we're not on a finder/separator)
     assert!(
         module.can_overwrite_with(&Module::Dark),
@@ -952,40 +983,172 @@ impl TryFrom<usize> for MaskPattern {
     }
 }
 
+// https://www.thonky.com/qr-code-tutorial/format-version-information#put-the-format-string-into-the-qr-code
+// It's easiest to just hardcode the coordinates for the format info
+// do lsb (14 - thonky diagram) -> msb(0).
+// Coordinates are (i, j) for the top left corner -> the others can be computed via info the comments below.
+const FORMAT_INFO_COORDINATES: [(usize, usize); 15] = [
+    (0, 8), // 14 LSB -> RHS of matrix @ (j, side_length - i - 1)
+    (1, 8), // 13
+    (2, 8), // 12
+    (3, 8), // 11
+    (4, 8), // 10
+    (5, 8), // 9
+    (7, 8), // 8
+    (8, 8), // 7 -- End RHS
+    (8, 7), // 6 -- Start bottom, is @ (side_length - 7 + i - 8 , i)
+    (8, 5), // 5
+    (8, 4), // 4
+    (8, 3), // 3
+    (8, 2), // 2
+    (8, 1), // 1
+    (8, 0), // 0
+];
+
+const FORMAT_INFO_BITSTRING_LEN: usize = 15;
 // Needs to encircle the top left finder but not overlap the timing
 // Bottom left format: bits are written under the dark bit down to the bottom.
 // (i.e.) column to the right of the bottom left finder, 1 module right of the separator.
 //
 // Top Right format: bits are reserved under the format square, 1 below the separator row.
+
+// THIS FUNCTION STILL NEEDS TESTING.
 pub(crate) fn emplace_format_information_area(
     matrix: &mut SquareMatrix<Module>,
     ecc_level: ECCLevel,
     mask_pattern: MaskPattern,
 ) {
-    let ecc_bits = ecc_level.ecc_bits_for_format_string();
+    let side_length = matrix.side_length();
+    // NOTE: FORMAT STRINGS ARE PRECOMPUTED AND CAN BE LOOKED UP.
+    // IDX IS ECC_CAPACITY_IDX * 8 + MASK NO;
+    //
+    // All that's needed is to emplace the format bits
+    let table_idx = ecc_level.capacity_idx() * MAX_NUM_MASK_PATTERNS + mask_pattern as usize;
 
-    // NOTE: these can be computed at compile time in tables.rs
-    // Similarly, they can be kung-fu copy pasted from thonky.
-    // TODO: migrate this logic and precompute the tables.
+    let format_bitstring = FORMAT_INFO_STRINGS[table_idx];
+    for i in 0..FORMAT_INFO_BITSTRING_LEN {
+        let mask = (1 << i) as u16;
+        // This should be a bit a bit.
+        let write_value = ((format_bitstring & mask) >> i) as u8;
 
-    // This can at most have 3 bits in length
-    let mask_pattern_bits: u8 = mask_pattern.into();
-    let format_string = (ecc_bits << 3) | mask_pattern_bits;
-    assert_eq!(format_string.leading_zeros(), 3);
+        // TODO: refactor into result; for now assertions are fine.
+        // This should have either the msb at 0 (if 0, i.e. no msb), or 1 if it's 1
+        assert!((0u32..=1).contains(&find_msb(write_value as u32)));
+        let write_bit = write_value & 1 == 1;
+        let write_module = Module::Format(write_bit);
 
-    // 5-bit format string
-    todo!("Implement format information area.");
+        // Get the next coordinate.
+        let (i_0, j_0) = FORMAT_INFO_COORDINATES[i];
+        let lhs_module = matrix.get_mut(i_0, j_0);
+        // These bits -have- to be writable, otherwise we're pointing at a function pattern,
+        // meaning the version coordinates are wrong.
+        assert!(lhs_module.writable());
+        *lhs_module = write_module;
+
+        // Handle Bottom/RHS:
+        // j_0 == 8 means we're writing the rhs
+        let (i_1, j_1) = if j_0 == 8 {
+            // Use i here, i_0 doesn't hit 6 on LHS.
+            (j_0, side_length - i - 1)
+        }
+        // Otherwise, we're writing the bottom.VERSION_
+        else {
+            (side_length - 7 + i - 8, i_0)
+        };
+
+        let other_module = matrix.get_mut(i_1, j_1);
+        assert!(
+            other_module.writable(),
+            "Format Index arithmetic is probably off.\n i0: {i_0}, j0: {j_0}, i_1: {i_1}, j_1: {j_1}\n\
+            module: {:?}",
+            other_module
+        );
+        *other_module = write_module;
+    }
 }
 
-// Adjacent to the bottom left and top right finder.
-//
-// (i: 3 x j: 6) version information block above bottom left,
-// (i: 6 x j: 3) version information to the left of the top right.
-pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, version: usize) {
-    // NOTE: Like the format info strings, these can be precomputed at compile time
-    // (or kung-fu copy-pasted from thonky).
+// Do LSB to MSB.
+// 0 -> 17 (shifts)
 
-    todo!("Implement emplace version information");
+// Adjacent to the bottom left and top right finder.
+//  -->
+// (i: 3 x j: 6) version information block above bottom left,
+//  | msb: 00 | 03 | 06 | 09 | 12 | 15 |
+//  ------------------------------------
+//  |    01   | 04 | 07 | 10 | 13 | 16 |
+//  ------------------------------------
+//  |    02   | 05 | 08 | 11 | 14 | 17 |
+// (i: 6 x j: 3) version information to the left of the top right (ie. is the transpose)
+//
+//  | msb: 00 | 01 | 02 |
+//  ---------------------
+//  |   03    | 04 | 05 |
+//  ---------------------
+//  |   06    | 07 | 08 |
+//  ---------------------
+//  |   09    | 10 | 11 |
+//  ---------------------
+//  |   12    | 13 | 14 |
+//  ---------------------
+//  |   15    | 16 | 17 |
+//
+// These are directly adjacent to format square + separators, which are 8 bits in length
+// So, the offset is 8 + smallest matrix dimesion (3) = 11
+
+// This constant may go unused because of the loop structure.
+const VERSION_INFO_BITSTRING_LEN: usize = 18;
+const VERSION_MATRIX_OFFSET: usize = 11;
+
+// This is easiest to handle with a double loop.
+// for i in 0..6 {
+//   for j in 0..3 {
+//      // bit idx = i * 3 + j;
+//      ... and so on.
+//      Bottom Left table is (side_length - OFFSET + j, i)
+//      Top Right table is (i, side_length - OFFSET + j)
+//   }
+// }
+
+//
+pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, version: usize) {
+    // NOTE: VERSION BITSTRINGS ARE PRECOMPUTED AND CAN BE LOOKED UP.
+    // TABLE IDX is version - 7;
+    assert!(
+        version >= 7,
+        "Invalid version passed, must be 7 or greater: {version}"
+    );
+
+    // These are tested and should be assumed to be correct.
+    let version_string = VERSION_INFO_STRINGS[version - 7];
+    let side_length = matrix.side_length();
+    // emplace the version bits like so.
+    for i in 0..6 {
+        for j in 0..3 {
+            let bit_idx = i * 3 + j;
+            let bit_mask = 1 << bit_idx;
+            let write_value = ((version_string & bit_mask) >> bit_idx) as u8;
+            let write_bit = (write_value & 1) == 1;
+            // Sanity check.
+            assert!((0u32..=1).contains(&find_msb(write_value as u32)));
+            let write_module = Module::Version(write_bit);
+
+            // Insertion pointer.
+            let p = side_length - VERSION_MATRIX_OFFSET + j;
+
+            // Bottom left side:
+            let bottom_module = matrix.get_mut(p, i);
+            // Ensure it's writable -> if it's not, we've hit a reserved spot and I've done
+            // something wrong.
+            assert!(bottom_module.writable());
+            *bottom_module = write_module;
+
+            // Top Right side:
+            let top_module = matrix.get_mut(i, p);
+            // Again, assert writable.
+            assert!(top_module.writable());
+            *top_module = write_module;
+        }
+    }
 }
 
 pub(crate) fn emplace_data_bits(
