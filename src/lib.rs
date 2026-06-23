@@ -1,8 +1,10 @@
 // Galois compile-time tables are computed recursively, so the stack limit needs to be doubled.
+// TODO: refactor const table generators into while loops and remove the recursion limit (back to 128).
 #![recursion_limit = "512"]
 mod ecc;
 mod encoding;
 mod galois;
+mod mask;
 mod matrix;
 mod qr;
 mod reed_solomon;
@@ -14,6 +16,7 @@ mod versioning;
 //
 // TODO: more test cases can (and should) be generated using:
 // https://www.nayuki.io/page/creating-a-qr-code-step-by-step
+// - (and rxing to generate programmatically)
 #[cfg(test)]
 mod tests {
     use crate::ecc::ECCLevel;
@@ -25,7 +28,7 @@ mod tests {
     };
     use crate::matrix::{
         SquareMatrix, emplace_alignment_squares, emplace_finder_patterns_into_blank_matrix,
-        emplace_timing_patterns,
+        emplace_timing_patterns, print_matrix_and_crash,
     };
     use crate::qr::{
         QrSegmentation, compute_ecc_codewords, encode_data_to_bytes, encode_qr,
@@ -34,6 +37,15 @@ mod tests {
     use crate::reed_solomon::ReedSolomon;
     use crate::tables::*;
     use crate::versioning::get_min_required_version;
+
+    // TESTS TO STILL BE IMPLEMENTED:
+    // - Expect cases for test_encode_qr: these should be retrieved from a source verified to be
+    // correct
+    //      - i.e. use ZXing
+    //      - (bring in rxing as a developer dependency and generate test cases)
+    //
+    // - Unit tests for the penalty functions
+    // - Unit tests for resize/resampling
 
     #[test]
     fn test_regexes() {
@@ -697,10 +709,105 @@ mod tests {
 
         assert_eq!(v7_version, 7);
 
-        // let encoded = encode_qr(data, ECCLevel::Q);
-        let encoded = encode_qr(&v7_test, ECCLevel::Q);
+        // Per the selection algorithm, this is returning mask 6
+        let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        // Per the selection algorithm, this is returning mask 0
+        let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
 
-        todo!("Encode matrix for comparison.");
+        todo!("Encode matrix expect cases for comparison.");
+    }
+
+    #[test]
+    fn test_qr_render_to_bytes() {
+        // Alphanumeric, version 1, ecc level Q
+        let data = "HELLO WORLD";
+
+        // Note -> this doesn't emplace spaces between each "HELLO WORLD"
+        // The v7_string should be:
+        // HELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLD
+        // -> test this with existing online encoders and compare by inspection until the full
+        // implementation is complete and can be automated.
+        let v7_test = data.repeat(11);
+        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+
+        assert_eq!(v7_version, 7);
+
+        // Per the selection algorithm, this is returning mask 6
+        let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        // Per the selection algorithm, this is returning mask 0
+        let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
+
+        // These are in -pixel- values, so they're complement QR values.
+        let v1_bytes = encoded_v1.render();
+        let v7_bytes = encoded_v7.render();
+
+        // This should be expected to be removed
+        // For now, inspection and manual verification is being used to tease out immediate errors.
+        eprintln!("V1 -------------");
+        let v1_s = v1_bytes.side_length();
+        for i in 0..v1_s {
+            for j in 0..v1_s {
+                match v1_bytes.get(i, j) {
+                    0 => eprint!("#"),
+                    // White is now 1 after rendering.
+                    1 => eprint!("_"),
+                    _ => unreachable!("This should only encode 1-bit color."),
+                }
+                eprint!(" ");
+            }
+            eprintln!();
+        }
+        eprintln!("V1 -------------");
+        eprintln!("V7 -------------");
+        let v7_s = v7_bytes.side_length();
+
+        for i in 0..v7_s {
+            for j in 0..v7_s {
+                match v7_bytes.get(i, j) {
+                    0 => eprint!("#"),
+                    // White is now 1 after rendering.
+                    1 => eprint!("_"),
+                    _ => unreachable!("This should only encode 1-bit color."),
+                }
+                eprint!(" ");
+            }
+            eprintln!();
+        }
+
+        eprintln!("V7 -------------");
+
+        todo!("Create expect cases to compare each output.");
+    }
+
+    #[test]
+    fn test_qr_render_resample() {
+        // Alphanumeric, version 1, ecc level Q
+        let data = "HELLO WORLD";
+
+        // Note -> this doesn't emplace spaces between each "HELLO WORLD"
+        // The v7_string should be:
+        // HELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLD
+        // -> test this with existing online encoders and compare by inspection until the full
+        // implementation is complete and can be automated.
+        let v7_test = data.repeat(11);
+        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+
+        assert_eq!(v7_version, 7);
+
+        // Per the selection algorithm, this is returning mask 6
+        let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        // Per the selection algorithm, this is returning mask 0
+        let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
+
+        // These are in -pixel- values, so they're complement QR values.
+        let v1_bytes = encoded_v1.render();
+        let v7_bytes = encoded_v7.render();
+
+        // This has yet to be designed in full
+        // - Sampling is implemented for SquareMatrix <u8>
+        //      - it has not been tested
+        // - A resampling routine with bounds-checking has not been implemented and needs to be.
+        todo!("Implement image-resampling to test sample_matrix method.");
     }
 
     #[test]
@@ -745,7 +852,6 @@ mod tests {
         for i in 0..side_length {
             for j in 0..side_length {
                 let idx = i * side_length + j;
-                let next_idx = i * side_length + j + 1;
                 assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
             }
         }
@@ -795,8 +901,6 @@ mod tests {
         for i in 0..side_length {
             for j in 0..side_length {
                 let idx = i * side_length + j;
-
-                let next_idx = i * side_length + j + 1;
 
                 assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
             }
@@ -875,8 +979,4 @@ mod tests {
             }
         }
     }
-
-    // TODO: More QR tests, bring in test cases from online tools and just generate/compare based
-    // on pixels.
-    // It's a little untenable to test larger codes by hand.
 }

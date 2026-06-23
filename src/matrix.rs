@@ -1,11 +1,11 @@
 use crate::ecc::ECCLevel;
+use crate::mask::compute_best_mask;
+use crate::mask::*;
 use crate::tables::*;
 use bitvec::prelude::*;
 
 // The quiet zone needs to be at least 4 modules around the matrix
 const QUIET_ZONE_SIZE: usize = 4;
-
-const MAX_NUM_MASK_PATTERNS: usize = 8;
 
 // NOTE TO SELF: matrices work in units of "modules" (using m to denote).
 // These are similar to the concept of a "texel" or a matrix cell.
@@ -167,6 +167,8 @@ where
     side_length: usize,
 }
 
+// CLEANUP TODO: Option-based implicit bounds checks once the code is tested enough to be
+// considered correct.
 impl<T> SquareMatrix<T>
 where
     T: Clone + std::fmt::Debug + Default,
@@ -191,6 +193,23 @@ where
     }
     pub(crate) fn get_mut(&mut self, i: usize, j: usize) -> &mut T {
         &mut self.data[self.side_length * i + j]
+    }
+
+    // NOTE: this will panic if [i, j] + num_elements goes out of bounds
+    // per the logic of a 2D matrix.
+    // CLEANUP TODO: refactor into result.
+    // NOTE: this is non-inclusive per slice semantics
+    pub(crate) fn get_row_range(&self, i: usize, j: usize, num_elements: usize) -> &[T] {
+        let n = self.side_length();
+        assert!(
+            j + num_elements - 1 < n,
+            "ROW READ OUT OF RANGE! row_length: {n}, column_idx: {} ",
+            j + num_elements - 1
+        );
+
+        let idx = n * i + j;
+
+        &self.data[idx..idx + num_elements]
     }
 }
 
@@ -245,7 +264,7 @@ impl QRCodeMatrix {
     // Let the drawing routine happen in the constructor.
     // TODO: add a mask hint + version hints.
     pub(crate) fn new(codewords: &BitVec<u8, Msb0>, version: usize, ecc_level: ECCLevel) -> Self {
-        let matrix = draw_qr_code(codewords, version, ecc_level);
+        let matrix = draw_and_pick_best_qr_code(codewords, version, ecc_level);
         Self {
             matrix,
             version,
@@ -270,7 +289,8 @@ impl QRCodeMatrix {
         let old_matrix = self.matrix();
         let old_side_length = old_matrix.side_length();
 
-        let new_side_length = old_side_length + QUIET_ZONE_SIZE;
+        // The quiet zone appears on either side of the matrix.
+        let new_side_length = old_side_length + 2 * QUIET_ZONE_SIZE;
         let mut mat = vec![1; new_side_length * new_side_length];
         for i in 0..old_side_length {
             for j in 0..old_side_length {
@@ -290,7 +310,7 @@ impl QRCodeMatrix {
 
 // White module = 0 = false
 // Black module = 1 = true
-fn draw_qr_code(
+pub(crate) fn draw_and_pick_best_qr_code(
     codewords: &BitVec<u8, Msb0>,
     version: usize,
     ecc_level: ECCLevel,
@@ -332,14 +352,15 @@ fn draw_qr_code(
         emplace_data_bits(candidate, codewords, mask_pattern);
     }
 
-    todo!("Implement the penalty algorithm and select the best candidate.");
-    // let candidate_idx = algo
-    // return candidates.remove(candidate_idx) -> pick the best one.
+    let best_mask = compute_best_mask(&candidates);
+
+    // Candidates gets deallocated anyway, but removal avoids implicit clones.
+    candidates.swap_remove(best_mask)
 }
 
 // This is just for inspection tests
 #[cfg(debug_assertions)]
-fn print_matrix_and_crash(matrix: &SquareMatrix<Module>) {
+pub(crate) fn print_matrix_and_crash(matrix: &SquareMatrix<Module>) {
     let side_length = matrix.side_length();
     // num cells * (character + tab) + newlines
     let mut num_data = 0;
@@ -905,93 +926,6 @@ fn get_alignment_module_value(acc: usize) -> bool {
     // Hopefully this compiles to a LUT.
     // If speed is ever an issue, consider making a LUT in tables.rs.
     !([6, 7, 8, 11, 13, 16, 17, 18].contains(&acc))
-}
-
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub(crate) enum MaskPattern {
-    Zero,
-    One,
-    Two,
-    Three,
-    Four,
-    Five,
-    Six,
-    Seven,
-}
-
-impl MaskPattern {
-    // This should be called on a writable/data area
-    // Applies the masking rule to suggest whether to flip the bit at (row, column).
-    pub(crate) fn should_mask(&self, row: usize, column: usize) -> bool {
-        match self {
-            // (row + column) mod 2 == 0
-            Self::Zero => (row + column) & 1 != 1,
-            // (row) mod 2 == 0
-            Self::One => row & 1 != 1,
-            // (column) mod 3 == 0
-            Self::Two => column.rem_euclid(3) == 0,
-            // (row + column) mod 3 == 0
-            Self::Three => (row + column).rem_euclid(3) == 0,
-            // (floor(row / 2) + floor(column / 3) ) mod 2 == 0
-            Self::Four => ((row >> 1) + (column / 3)) & 1 != 1,
-            // (row * column) mod 2 + (row * column) mod 3 == 0
-            Self::Five => (row * column).rem_euclid(2) + (row * column).rem_euclid(3) == 0,
-            // ((row * column) mod 2 + (row * column) mod 3) mod 2 == 0
-            Self::Six => ((row * column).rem_euclid(2) + (row * column).rem_euclid(3)) & 1 != 1,
-            // ((row + PLUS column) mod 2 + (row * column) mod 3) mod 2 == 0
-            Self::Seven => ((row + column).rem_euclid(2) + (row * column).rem_euclid(3)) & 1 != 1,
-        }
-    }
-}
-
-impl TryFrom<u8> for MaskPattern {
-    type Error = ();
-    fn try_from(n: u8) -> Result<Self, Self::Error> {
-        match n {
-            0 => Ok(Self::Zero),
-            1 => Ok(Self::One),
-            2 => Ok(Self::Two),
-            3 => Ok(Self::Three),
-            4 => Ok(Self::Four),
-            5 => Ok(Self::Five),
-            6 => Ok(Self::Six),
-            7 => Ok(Self::Seven),
-            _ => Err(()),
-        }
-    }
-}
-
-impl From<MaskPattern> for u8 {
-    fn from(m: MaskPattern) -> Self {
-        match m {
-            MaskPattern::Zero => 0,
-            MaskPattern::One => 1,
-            MaskPattern::Two => 2,
-            MaskPattern::Three => 3,
-            MaskPattern::Four => 4,
-            MaskPattern::Five => 5,
-            MaskPattern::Six => 6,
-            MaskPattern::Seven => 7,
-        }
-    }
-}
-
-impl TryFrom<usize> for MaskPattern {
-    type Error = ();
-    fn try_from(n: usize) -> Result<Self, Self::Error> {
-        match n {
-            0 => Ok(Self::Zero),
-            1 => Ok(Self::One),
-            2 => Ok(Self::Two),
-            3 => Ok(Self::Three),
-            4 => Ok(Self::Four),
-            5 => Ok(Self::Five),
-            6 => Ok(Self::Six),
-            7 => Ok(Self::Seven),
-            _ => Err(()),
-        }
-    }
 }
 
 // https://www.thonky.com/qr-code-tutorial/format-version-information#put-the-format-string-into-the-qr-code
