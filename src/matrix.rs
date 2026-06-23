@@ -57,7 +57,10 @@ const MAX_NUM_MASK_PATTERNS: usize = 8;
 // BLACK MODULE = 1 = true
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum Module {
+    // This indicates the module is unoccupied
     Writable(bool),
+    // Make it such that "data" indicates "occupied"
+    Data(bool),
     Finder(bool),
     // Technically separators are part of the finder pattern.
     Separator,
@@ -74,6 +77,7 @@ impl Module {
     pub(crate) fn inner(&self) -> bool {
         match *self {
             Self::Writable(inner) => inner,
+            Self::Data(inner) => inner,
             Self::Finder(inner) => inner,
             Self::Timing(inner) => inner,
             Self::Alignment(inner) => inner,
@@ -88,6 +92,7 @@ impl Module {
     pub(crate) fn complement(&mut self) {
         match self {
             Self::Writable(inner) => *inner = !*inner,
+            Self::Data(inner) => *inner = !*inner,
             Self::Finder(inner) => *inner = !*inner,
             Self::Timing(inner) => *inner = !*inner,
             Self::Alignment(inner) => *inner = !*inner,
@@ -113,6 +118,9 @@ impl Module {
     pub(crate) fn can_overwrite_with(&self, with_module: &Self) -> bool {
         match *self {
             Self::Writable(_) => true,
+            // WRITE THE DATA LAST. Data should not be considered part of a painter's algorithm
+            // approach.
+            Self::Data(_) => false,
             // Separators are part of finder-patterns and they cannot be overlapped with anything.
             Self::Finder(_) => false,
             Self::Separator => false,
@@ -128,9 +136,11 @@ impl Module {
             // writing the finder and timing patterns.
             // Alignment squares need to blend in with the timing modules.
             Self::Alignment(_) => false,
-            // Version/format shouldn't be able to overwrite anything other than Writable.
-            Self::Version(_) => matches!(with_module, Self::Version(_)),
-            Self::Format(_) => matches!(with_module, Self::Format(_)),
+            // Since there's no pre-reservation of space, these no longer should be overwritable.
+            // (The penalty algorithm reads the entire matrix - so Version and Format bits need to
+            // be written beforehand).
+            Self::Version(_) => false,
+            Self::Format(_) => false,
             Self::Dark => false,
         }
     }
@@ -317,34 +327,6 @@ fn draw_qr_code(
         // Write format information
         emplace_format_information_area(candidate, ecc_level, mask_pattern);
 
-        // TODO: remove this -> this is just for feedback when testing
-        #[cfg(debug_assertions)]
-        {
-            // Iterate and print the qr matrix as it looks (the drawing routine's not yet
-            // implemented, so it'll just crash).
-
-            // It's getting tricky to produce unit tests so this will have to do for now.
-            // Expect it to print out most of the matrix after crashing.
-            let side_length = candidate.side_length();
-            // Write into a string and just spit it out all at once.
-            // This code -will- be removed.
-            let mut out_string = String::with_capacity(2 * side_length * side_length);
-            for i in 0..side_length {
-                for j in 0..side_length {
-                    match candidate.get(i, j).inner() {
-                        // True = black => write an x.
-                        true => out_string.push('X'),
-                        // False = white.
-                        false => out_string.push('_'),
-                    }
-                    out_string.push(' ');
-                }
-
-                out_string.push('\n')
-            }
-            eprintln!("{out_string}");
-        }
-
         // Write the data bits -> this is done by mutation, since it's faster to just
         // preallocate all 8 matrices.
         emplace_data_bits(candidate, codewords, mask_pattern);
@@ -353,6 +335,35 @@ fn draw_qr_code(
     todo!("Implement the penalty algorithm and select the best candidate.");
     // let candidate_idx = algo
     // return candidates.remove(candidate_idx) -> pick the best one.
+}
+
+// This is just for inspection tests
+#[cfg(debug_assertions)]
+fn print_matrix_and_crash(matrix: &SquareMatrix<Module>) {
+    let side_length = matrix.side_length();
+    // num cells * (character + tab) + newlines
+    let mut num_data = 0;
+    let mut out_string = String::with_capacity(3 * side_length * side_length + side_length);
+    for i in 0..side_length {
+        for j in 0..side_length {
+            let mat = matrix.get(i, j);
+
+            match mat.inner() {
+                true => out_string.push('#'),
+                false => out_string.push(' '),
+            }
+            if let Module::Data(_) = mat {
+                num_data += 1;
+            }
+            out_string.push(' ');
+        }
+        out_string.push('\n');
+    }
+    eprintln!("----------------------------------------------------------------");
+    eprintln!("{out_string}");
+    eprintln!("----------------------------------------------------------------");
+    eprintln!("num_data bits written: {num_data}");
+    panic!("Breakpoint to check the matrix");
 }
 
 // ---- TIMING PATTERNS ---
@@ -1026,7 +1037,7 @@ pub(crate) fn emplace_format_information_area(
     let table_idx = ecc_level.capacity_idx() * MAX_NUM_MASK_PATTERNS + mask_pattern as usize;
 
     let format_bitstring = FORMAT_INFO_STRINGS[table_idx];
-    for i in 0..FORMAT_INFO_BITSTRING_LEN {
+    for (i, coordinate) in FORMAT_INFO_COORDINATES.iter().enumerate() {
         let mask = (1 << i) as u16;
         // This should be a bit a bit.
         let write_value = ((format_bitstring & mask) >> i) as u8;
@@ -1038,7 +1049,7 @@ pub(crate) fn emplace_format_information_area(
         let write_module = Module::Format(write_bit);
 
         // Get the next coordinate.
-        let (i_0, j_0) = FORMAT_INFO_COORDINATES[i];
+        let (i_0, j_0) = *coordinate;
         let lhs_module = matrix.get_mut(i_0, j_0);
         // These bits -have- to be writable, otherwise we're pointing at a function pattern,
         // meaning the version coordinates are wrong.
@@ -1109,7 +1120,6 @@ const VERSION_MATRIX_OFFSET: usize = 11;
 //   }
 // }
 
-//
 pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, version: usize) {
     // NOTE: VERSION BITSTRINGS ARE PRECOMPUTED AND CAN BE LOOKED UP.
     // TABLE IDX is version - 7;
@@ -1151,10 +1161,91 @@ pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, ver
     }
 }
 
+// TODO: figure out what's wrong here.
 pub(crate) fn emplace_data_bits(
-    candidate: &mut SquareMatrix<Module>,
+    matrix: &mut SquareMatrix<Module>,
     codewords: &BitVec<u8, Msb0>,
     mask_pattern: MaskPattern,
 ) {
-    todo!("Implement drawing routine.");
+    const TIMING_IDX: usize = 6;
+    let side_length = matrix.side_length();
+    let mut direction = -1;
+    let mut row = (side_length - 1) as i32;
+    let mut column = side_length - 1;
+
+    let mut bit_idx = 0;
+
+    // Columns are written in 2's, so we can stop when the column
+    // index pointer == 0
+    while column > 0 {
+        // Skip the timing column
+        if column == TIMING_IDX {
+            column -= 1;
+        }
+
+        // Up and down part of the zig-zag
+        while row >= 0 && row < side_length as i32 {
+            // Skip the timing row.
+            if row == TIMING_IDX as i32 {
+                row += direction;
+            }
+
+            // Right to left part of the zig-zag
+            // Index the table at (row, j)
+            for k in 0..2 {
+                let j = column - k;
+                let module = matrix.get_mut(row as usize, j);
+
+                if !module.writable() {
+                    continue;
+                }
+
+                // The remainder bits are
+                // Write to the matrix at (row, j):
+                // Get the bit value.
+                // (TODO: refactor the expect out to a result once code is debugged)
+                let bit_val = *codewords
+                    .get(bit_idx)
+                    .as_deref()
+                    .expect("The bit_idx should always be in range.");
+
+                // Check if we mask.
+                let write_value = if mask_pattern.should_mask(row as usize, j) {
+                    !bit_val
+                } else {
+                    bit_val
+                };
+
+                // Write the module
+                let write_module = Module::Data(write_value);
+                *module = write_module;
+                // Increment the bit index pointer and move onto the next write.
+                bit_idx += 1;
+            }
+
+            row += direction;
+        }
+
+        // Negate the direction to flip row traversal.
+        direction = -direction;
+        row += direction;
+        // Bump the column over by two.
+        // Saturate the subtraction to avoid OOB -> the loop will still break.
+        column = column.saturating_sub(2);
+    }
+
+    // Sanity checks (transform this into result):
+    // Bit_idx => Should end at codewords.len()
+    // column => ends at 0
+    // row => ends at side_length - 1
+    // directions is now going up => is negative.
+    assert_eq!(column, 0, "Column is off: {column}");
+    assert_eq!(row, (side_length - 1) as i32, "Row is off: {row}");
+    assert_eq!(
+        bit_idx,
+        codewords.len(),
+        "bit idx is off. bit_idx: {bit_idx}, num_bits: {}",
+        codewords.len()
+    );
+    assert!(direction.is_negative(), "Direction is off: {direction}");
 }

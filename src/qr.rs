@@ -44,9 +44,9 @@ pub struct QRError;
 pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> QRCodeMatrix {
     let (interleaved_with_ecc, version, ecc_level) = prepare_qr_codewords(&data, ecc_level);
     // Convert back to a bitfield and add the remainder bits.
-    // Remainder bits are by version and error level.
-    let table_idx = version * 4 + ecc_level.capacity_idx();
-    let n_remainder_bits = REMAINDER_BITS[table_idx] as usize;
+    // Remainder bits are by version only -> version counts from one, so it needs to be
+    // decremented.
+    let n_remainder_bits = REMAINDER_BITS[version - 1] as usize;
 
     // TODO: refactor assertions to Result during API cleanup
     let interleaved_bits = interleaved_with_ecc.len() * 8;
