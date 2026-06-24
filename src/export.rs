@@ -56,23 +56,13 @@ pub fn nearest_integer_multiple(old_side_length: usize, new_side_length: usize) 
 // MDN SVG: https://developer.mozilla.org/en-US/docs/Web/SVG/Reference/Attribute/viewBox
 // MDN SVG: https://developer.mozilla.org/en-US/docs/Web/SVG/Reference/Element/rect
 
-// NOTE: it is ill-advised to resample the pixels to a size smaller than
-// the minimum size per version:
-// The minimum side length, s: (((v-1) * 4) + 21), where v is the version (counting from 1)
-// TODO: (per above) guard against this; abstract over SquareMatrix<u8> and append the QR version.
-// TODO TWICE: refactor this to return a result if the new side length is smaller than the
-// original. -> or, get rid of this function if it's handled by svg scaling.
-// (again, ill advised to scale the svg below the pixel size -> but svgs are infinitely scalable)
+// SVGs are infinitely scalable -> but with nearest-neighbor resampling,
+// sampling below the minimum pixel size will degrade the QR
+// TODO guard against this if the function is going to remain.
 //
 // Loop through each cell, on a black one, set x (j) and y (i),
 // width and height are the same length -> use 1 to make it easier; svgs are scalable.
 // desired side_length = desired width = desired height
-//
-// NOTE: I'm not entirely sure whether it's possible to write the svg doc and then scale it to the
-// desired size afterward by resetting the viewbox.
-// ====> I believe it might actually be possible to do that.
-// If the viewBox resize will automatically scale the svg without issue, then remove this function.
-// TODO: consider removing this entirely -> it's
 #[cfg(feature = "svg")]
 pub fn render_svg_with_resampling(
     matrix: &SquareMatrix<u8>,
@@ -117,7 +107,7 @@ pub fn render_svg_with_resampling(
                     .set("width", 1)
                     .set("height", 1)
                     .set("fill", "black")
-                    .set("stroke", 0.5);
+                    .set("stroke", 1.0);
 
                 doc = doc.add(rect);
             }
@@ -127,6 +117,7 @@ pub fn render_svg_with_resampling(
 }
 
 // Prefer this function -> it's more accurate and can handle fractional scaling.
+// TODO: expose rounded-corner border radius.
 #[cfg(feature = "svg")]
 pub fn render_svg_without_resampling(
     matrix: &SquareMatrix<u8>,
@@ -170,7 +161,7 @@ pub fn render_svg_without_resampling(
                     .set("width", block_size)
                     .set("height", block_size)
                     .set("fill", "black")
-                    .set("stroke", 0.5);
+                    .set("stroke", 1.0);
 
                 doc = doc.add(rect);
             }
@@ -183,6 +174,7 @@ pub fn render_svg_without_resampling(
 // Supply None to just use the matrix.side_length()
 // TODO: implement actual error types and return a proper error
 // TODO TWICE: (see above re: resizing issues).
+// TODO: expose rounded-corner border radius.
 #[cfg(feature = "svg")]
 pub fn save_svg(
     file_path: &Path,
@@ -201,6 +193,21 @@ pub(crate) fn write_svg(file_path: &Path, svg: &Document) -> Result<(), String> 
     res.map_err(|e| format!("ERROR: {}\nKIND: {}", e.to_string(), e.kind()))
 }
 
+// TODO: refactor this interface:
+//  ->  one function that doesn't take side-length -> DynamicImage can
+//      be resized on its own using image crate filters.
+//  ->  one function that takes in an optional side length for export
+//      (this one should use the nearest integer for scaling)
+//      -> The nearest neighbor implementation should be identical to the image crate
+//         so it doesn't really matter which gets used.
+//
+//   -> one function "render img size exact" or something similar used for fractional scaling
+//      -> Again, really doesn't matter which NN gets used.
+//
+//
+//
+//
+//
 // TODO: better docstring.
 // If fractional scaling is desired/necessary, as well as a DynamicImage,
 // the image should be rendered to the highest, closest, integer multiple,
@@ -214,11 +221,6 @@ pub(crate) fn write_svg(file_path: &Path, svg: &Document) -> Result<(), String> 
 // Transform it into a png on png_save.
 // Also, this -will- require resampling if side_length is Some(length)
 // and length != matrix.side_length()
-//
-// TODO: Refactor this -> the resampling isn't all that correct I don't think.
-// prefer the interpolation available in the image crate.
-// Nearest-neighbor will work best for integer multiples
-// Bilinear (?) for fractional scales.
 //
 // Again, as mentioned above, it is ill advised to resize below the minimum size required
 // for the given QR version.

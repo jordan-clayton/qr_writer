@@ -231,19 +231,45 @@ impl SquareMatrix<u8> {
 
     // This might be handled elsewhere, but can be used for re-interpolating
     // a QR (in texels/modules) into larger squares.
-    // This is a basic resampling and will not work well for fractional scaling.
-    // Nearest neighbor will work considerably better, but a reader should have little trouble
-    // picking up the code (so long as it's of sufficient size for the scanning distance).
+    // This is a basic nearest-neighbor sampling of the matrix
     pub fn sample_matrix(&self, i: usize, j: usize, img_side_length: usize) -> u8 {
         let n = self.side_length;
 
-        let u = (j + 1) as f32 / img_side_length as f32;
-        let v = (i + 1) as f32 / img_side_length as f32;
+        let ratio = n as f32 / img_side_length as f32;
 
-        let i0 = (v * (n - 1) as f32).round() as usize;
-        let j0 = (u * (n - 1) as f32).round() as usize;
+        // Sample the center of the original point
+        // -> this avoids the pixel drift with NN sampling.
+        let i0 = (i as f32 + 0.5) * ratio - 0.5;
+        let j0 = (j as f32 + 0.5) * ratio - 0.5;
 
-        *self.get(i0, j0)
+        let i_1 = i0.floor().clamp(0.0, (n - 1) as f32);
+        let i_2 = i0.ceil().clamp(0.0, (n - 1) as f32);
+        let j_1 = j0.floor().clamp(0.0, (n - 1) as f32);
+        // Clamp to the side length to avoid sampling the next row.
+        let j_2 = j0.ceil().clamp(0.0, (n - 1) as f32);
+
+        let points = [(i_1, j_1), (i_1, j_2), (i_2, j_1), (i_2, j_2)];
+        let sample = (i0, j0);
+        let mut min_dist = f32::MAX;
+        let mut sample_point: Option<(usize, usize)> = None;
+
+        // Closure to compute the squared distance.
+        // If this happens to be required elsewhere, refactor it to an inline function.
+        let dist = |p1: (f32, f32), p2: (f32, f32)| {
+            let d = (p2.0 - p1.0, p2.1 - p1.1);
+
+            d.0 * d.0 + d.1 * d.1
+        };
+        points.iter().for_each(|p| {
+            let sample_d = dist(sample, *p);
+            if sample_d < min_dist || sample_point.is_none() {
+                min_dist = sample_d;
+                sample_point = Some((p.0 as usize, p.1 as usize))
+            }
+        });
+
+        let (i_a, j_a) = sample_point.expect("Sample point should be assigned.");
+        *self.get(i_a, j_a)
     }
 }
 

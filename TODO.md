@@ -4,10 +4,8 @@
 
 
 ## QR Rendering
-- Test resampling completes
-- Test resampling against rxing for square matrices
+- Finish basic img export API
 
 ## Next Steps
-- Implement horizontal/vertical padding for non-square image export
 - Implement mask and version hints and expose to API
 - API cleanup refactoring
