@@ -134,7 +134,7 @@ pub(crate) fn compute_best_mask(matrices: &[SquareMatrix<Module>]) -> usize {
             best_mask = i;
         }
     }
-    return best_mask;
+    best_mask
 }
 
 // NOTE: This is -just- for testing to ensure the scores are correct.
@@ -160,7 +160,7 @@ pub(crate) fn penalty_rule_1(matrix: &SquareMatrix<Module>) -> usize {
 
 // This could just be a boolean.
 #[repr(C)]
-enum RunDirection {
+pub(crate) enum RunDirection {
     Row,
     Column,
 }

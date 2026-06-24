@@ -5,7 +5,7 @@ use crate::tables::*;
 use bitvec::prelude::*;
 
 // The quiet zone needs to be at least 4 modules around the matrix
-const QUIET_ZONE_SIZE: usize = 4;
+pub(crate) const QUIET_ZONE_SIZE: usize = 4;
 
 // NOTE TO SELF: matrices work in units of "modules" (using m to denote).
 // These are similar to the concept of a "texel" or a matrix cell.
@@ -16,19 +16,19 @@ const QUIET_ZONE_SIZE: usize = 4;
 // Future TODO: Version, Mask hints to allow a user to try picking a mask/version pattern.
 
 // Drawing order
-// 1. Timing        *Done
-// 2. Finder        *Done
-//  2_i. Separator  *Done
-//  2_ii. Dark bit  *Done
-// 3. Alignment     *Done
+// 1. Timing
+// 2. Finder
+//  2_i. Separator
+//  2_ii. Dark bit
+// 3. Alignment
 // ----
-// 4. Version (if applicable) *Done
+// 4. Version (if applicable)
 //  4_i. Version/Format can be drawn in either order, but masking makes things very complicated.
 //  4_ii. This is another reed_solomon, but it can be done on a much smaller scale.
 // ----
 // 5. Prepare for Masking:
-//      5_i Make 8 clones (yes, 8) -> one for each mask type to pick from based on the penalty algorithm *Done
-//      5_ii Skip the clone(TODO: Hints) *Done
+//      5_i Make 8 clones if no mask hint provided
+//      5_ii Skip the clone if a mask hint is provided
 //
 //      Note: The specification is unclear about whether the format/version information
 //      should be written before/after the data bits
@@ -42,16 +42,15 @@ const QUIET_ZONE_SIZE: usize = 4;
 //      the code.
 //
 // 6. For each mask version (or one if chosen):
-//  6_i. Write the Format bits. *Done
-//  6_ii. Write the data bits. *TODO
+//  6_i. Write the Format bits.
+//  6_ii. Write the data bits.
 //
 // 7. Run the penalty algorithm and pick the best code (unless mask hint supplied -- not yet
 //    implemented)
 //
 //    7_i. The "best" code is the one with the lowest penalty score.
 //
-// 8. Add the quiet zone.
-//
+// 8. Add the quiet zone -> is performed on render.
 
 // WHITE MODULE = 0 = false
 // BLACK MODULE = 1 = true
@@ -159,7 +158,7 @@ impl Default for Module {
 //
 // Current intention is to export QR as square only.
 #[derive(Clone, Debug)]
-pub(crate) struct SquareMatrix<T>
+pub struct SquareMatrix<T>
 where
     T: Clone + std::fmt::Debug + Default,
 {
@@ -183,15 +182,15 @@ where
         }
     }
 
-    pub(crate) fn side_length(&self) -> usize {
+    pub fn side_length(&self) -> usize {
         self.side_length
     }
     // Returns the actual module cell (which holds state)
     // use .inner() to determine the value (white = false/black = true)
-    pub(crate) fn get(&self, i: usize, j: usize) -> &T {
+    pub fn get(&self, i: usize, j: usize) -> &T {
         &self.data[self.side_length * i + j]
     }
-    pub(crate) fn get_mut(&mut self, i: usize, j: usize) -> &mut T {
+    pub fn get_mut(&mut self, i: usize, j: usize) -> &mut T {
         &mut self.data[self.side_length * i + j]
     }
 
@@ -199,7 +198,7 @@ where
     // per the logic of a 2D matrix.
     // CLEANUP TODO: refactor into result.
     // NOTE: this is non-inclusive per slice semantics
-    pub(crate) fn get_row_range(&self, i: usize, j: usize, num_elements: usize) -> &[T] {
+    pub fn get_row_range(&self, i: usize, j: usize, num_elements: usize) -> &[T] {
         let n = self.side_length();
         assert!(
             j + num_elements - 1 < n,
@@ -216,7 +215,7 @@ where
 // This will probably go unused.
 impl SquareMatrix<u8> {
     // This might go unused, but could be helpful.
-    pub(crate) fn complement(mut self) -> Self {
+    pub fn complement(mut self) -> Self {
         self.data.iter_mut().for_each(|b| {
             *b ^= 0xFF;
             *b &= 0x01;
@@ -224,7 +223,7 @@ impl SquareMatrix<u8> {
         self
     }
 
-    pub(crate) fn destructure_into_bytes(self) -> (Vec<u8>, usize) {
+    pub fn destructure_into_bytes(self) -> (Vec<u8>, usize) {
         let side_length = self.side_length;
         let mat = self.data;
         (mat, side_length)
@@ -232,7 +231,7 @@ impl SquareMatrix<u8> {
 
     // This might be handled elsewhere, but can be used for re-interpolating
     // a QR (in texels/modules) into larger squares.
-    pub(crate) fn sample_matrix(&self, i: usize, j: usize, img_side_length: usize) -> u8 {
+    pub fn sample_matrix(&self, i: usize, j: usize, img_side_length: usize) -> u8 {
         // Get the normalized coordinates.
         let u = (j + 1) as f32 / img_side_length as f32;
         let v = (i + 1) as f32 / img_side_length as f32;
@@ -254,7 +253,11 @@ impl SquareMatrix<Module> {
     }
 }
 
-pub(crate) struct QRCodeMatrix {
+// TODO: MIGRATE THIS TO A DIFFERENT FILE -> this should be within qr or similar.
+pub struct QRCodeMatrix {
+    // TODO: decide whether to make this concrete over u8 instead instead of Module.
+    // The module semantics are useful for construction and inspection, but they aren't and
+    // shouldn't be modifiable after construction.
     matrix: SquareMatrix<Module>,
     version: usize,
     ecc_level: ECCLevel,
@@ -263,7 +266,7 @@ pub(crate) struct QRCodeMatrix {
 impl QRCodeMatrix {
     // Let the drawing routine happen in the constructor.
     // TODO: add a mask hint + version hints.
-    pub(crate) fn new(codewords: &BitVec<u8, Msb0>, version: usize, ecc_level: ECCLevel) -> Self {
+    pub fn new(codewords: &BitVec<u8, Msb0>, version: usize, ecc_level: ECCLevel) -> Self {
         let matrix = draw_and_pick_best_qr_code(codewords, version, ecc_level);
         Self {
             matrix,
@@ -271,14 +274,15 @@ impl QRCodeMatrix {
             ecc_level,
         }
     }
-    pub(crate) fn version(&self) -> usize {
+    pub fn version(&self) -> usize {
         self.version
     }
-    pub(crate) fn ecc_level(&self) -> ECCLevel {
+    pub fn ecc_level(&self) -> ECCLevel {
         self.ecc_level
     }
 
     // This likely has very little practical use.
+    // Expose it if it's useful.
     pub(crate) fn matrix(&self) -> &SquareMatrix<Module> {
         &self.matrix
     }
@@ -1095,7 +1099,6 @@ pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, ver
     }
 }
 
-// TODO: figure out what's wrong here.
 pub(crate) fn emplace_data_bits(
     matrix: &mut SquareMatrix<Module>,
     codewords: &BitVec<u8, Msb0>,

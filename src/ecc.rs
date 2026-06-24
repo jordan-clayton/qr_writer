@@ -8,7 +8,7 @@ pub enum ECCLevel {
 }
 
 impl ECCLevel {
-    pub(crate) fn capability(&self) -> f32 {
+    pub fn capability(&self) -> f32 {
         match self {
             Self::L => 0.07,
             Self::M => 0.15,
@@ -18,7 +18,7 @@ impl ECCLevel {
     }
 
     // TODO: this needs a clearer name like ecc_idx
-    pub(crate) fn capacity_idx(&self) -> usize {
+    pub fn capacity_idx(&self) -> usize {
         match self {
             Self::L => 0,
             Self::M => 1,
@@ -28,7 +28,7 @@ impl ECCLevel {
     }
 
     // These bits specify the error correction level used for the format bitstring.
-    pub(crate) fn ecc_bits_for_format_string(&self) -> u8 {
+    pub fn ecc_bits_for_format_string(&self) -> u8 {
         match self {
             Self::L => 1,
             Self::M => 0,

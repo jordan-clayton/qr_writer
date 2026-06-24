@@ -12,6 +12,10 @@ use itertools::Itertools;
 use encoding_rs::*;
 
 // Cleanup TODO: magic constants.
+// Cleanup TODO: factor out table lookups to inline functions to reduce the chances of a pointer
+// arithmetic error.
+
+const MODE_BITSTRING_LEN: usize = 4;
 const PADDING_HI: u8 = 236;
 const PADDING_LOW: u8 = 17;
 
@@ -40,7 +44,8 @@ pub struct QRError;
 // look things up.
 // This module file is going to get large.
 
-// TODO: this should return a matrix.
+// This function should be the only entrypoint of the api.
+// TODO: add mask and version hints.
 pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> QRCodeMatrix {
     let (interleaved_with_ecc, version, ecc_level) = prepare_qr_codewords(&data, ecc_level);
     // Convert back to a bitfield and add the remainder bits.
@@ -49,7 +54,7 @@ pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> QRCodeMatrix {
     let n_remainder_bits = REMAINDER_BITS[version - 1] as usize;
 
     // TODO: refactor assertions to Result during API cleanup
-    let interleaved_bits = interleaved_with_ecc.len() * 8;
+    let interleaved_bits = interleaved_with_ecc.len() * BYTE_LENGTH;
     // Cast to a bitfield and add the remainder bits.
     let mut bitfield = BitVec::<u8, Msb0>::from_vec(interleaved_with_ecc);
     bitfield.resize(bitfield.len() + n_remainder_bits, false);
@@ -147,7 +152,12 @@ pub(crate) fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> (Vec<u8>,
     };
 
     // Preallocate a bitarray.
-    let array_len = (char_count + 1) * prealloc_size as usize + 4;
+    // (char count) * prealloc_size + 4 + bit_length.
+    // As of right now, the functions themselves do not resize the bitarray until after the
+    // data has been encoded
+    // -> This has been fuzz-tested up to the maximum number of byte characters in L encoding
+    // -> This will be cleaned up to avoid crashing before the api is finalized
+    let array_len = char_count * prealloc_size as usize + MODE_BITSTRING_LEN + bit_length;
     // Lsb0 has better codegen.
     // For now, and per the information I can find, I think this has to be MSB.
     // I'm not quite sure if/whether it's possible/worth the headache to try and swap.
@@ -186,7 +196,7 @@ pub(crate) fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> (Vec<u8>,
     let num_codewords = TOTAL_NUM_CODEWORDS_BY_VERSION_AND_EC_LEVEL
         [((version - 1) * 4) as usize + ecc_level.capacity_idx()];
     // Compute the total number of bits for the QR.
-    let total_bits = num_codewords * 8;
+    let total_bits = num_codewords * BYTE_LENGTH as u16;
 
     // Extend the bitfield up to total_bits in-case we're not the right size.
     bits.resize(total_bits as usize, false);
@@ -219,6 +229,9 @@ pub(crate) fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> (Vec<u8>,
     (bits.into_vec(), version as usize, ecc_level)
 }
 
+// TODO: clean up these functions to avoid OOB panics.
+//      - Either resize in-case of pointer arithmetic errors or return a result (or both)
+//
 // TODO: make into result types.
 // TODO: Refactor into result types after debugging. This function should never be called on
 // non-numeric data.

@@ -249,8 +249,6 @@ pub(crate) fn gf_poly_mul(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> Galoi
         return gf_poly_scale(p1, p2.nth_coefficient(0).into());
     }
 
-    // There seems to be a bit of a bug in this multiplication but only for some terms.
-    // The alpha table -seems- correct, this needs some more scrutiny.
     let mut product = vec![0; p1.coefficients().len() + p2.coefficients().len() - 1];
     for i in 0..p1.coefficients().len() {
         let a = p1.coefficients()[i];

@@ -8,9 +8,15 @@ bitvec = "1.0.1"
 encoding_rs = {version = "0.8.35", optional = true}
 itertools = "0.14.0"
 regex = "1.12.4"
+image = {version = "0.25.8", optional = true}
 
 [features]
 # TODO: get rid of this after impl written
+# Kanji should be opt-in only
 default = ["kanji"]
 kanji = ["dep:encoding_rs"]
+image = ["dep:image"]
+
+[dev-dependencies]
+rxing = "0.9.1"
 

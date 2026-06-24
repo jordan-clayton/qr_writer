@@ -101,7 +101,7 @@ pub fn get_bit_length(mode: u8, version: u8) -> Result<u8, InvalidVersionError> 
 
     let mode_idx = get_mode_idx(mode);
     assert!(
-        mode_idx >= 0 && mode_idx <= 3,
+        mode_idx <= 3,
         "Invalid mode idx: {mode_idx}, mode: {mode}, leading_zeros: {}",
         mode.leading_zeros()
     );

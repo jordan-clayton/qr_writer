@@ -11,12 +11,20 @@ mod reed_solomon;
 mod tables;
 mod versioning;
 
+// These are basically the extent of what's required to gain value from this api.
+pub use ecc::ECCLevel;
+pub use matrix::QRCodeMatrix;
+pub use qr::encode_qr;
+
 // TODO: consider moving the galois tests/other module tests to their respective modules (if/where
 // possible) and reduce visibility where sensible.
 //
 // TODO: more test cases can (and should) be generated using:
 // https://www.nayuki.io/page/creating-a-qr-code-step-by-step
 // - (and rxing to generate programmatically)
+//
+// TODO: cleanup -> Format strings should either all have ending punctuation or none.
+//      + additional cleaning to make these tests easier to read.
 #[cfg(test)]
 mod tests {
     use crate::ecc::ECCLevel;
@@ -27,8 +35,8 @@ mod tests {
         gf_poly_zero,
     };
     use crate::matrix::{
-        SquareMatrix, emplace_alignment_squares, emplace_finder_patterns_into_blank_matrix,
-        emplace_timing_patterns, print_matrix_and_crash,
+        QUIET_ZONE_SIZE, SquareMatrix, emplace_alignment_squares,
+        emplace_finder_patterns_into_blank_matrix, emplace_timing_patterns, print_matrix_and_crash,
     };
     use crate::qr::{
         QrSegmentation, compute_ecc_codewords, encode_data_to_bytes, encode_qr,
@@ -37,6 +45,14 @@ mod tests {
     use crate::reed_solomon::ReedSolomon;
     use crate::tables::*;
     use crate::versioning::get_min_required_version;
+
+    // To encode the -actual- qr code
+    use rxing::qrcode::QRCodeWriter;
+    // To access the output data and access bits
+    // NOTE: these are still complemented internally (0 = false = white)
+    // so these will need to be complemented on comparison.
+    use rxing::common::BitMatrix;
+    use rxing::{BarcodeFormat, EncodeHintValue, EncodeHints, Writer};
 
     // TESTS TO STILL BE IMPLEMENTED:
     // - Expect cases for test_encode_qr: these should be retrieved from a source verified to be
@@ -687,13 +703,16 @@ mod tests {
             0xA3, 0x2B, 0x91, 0x90, 0x9C, 0x87, 0x32, 0xD4, 0xD8, 0xF0, 0x3C, 0xDF, 0xEF, 0x03,
         ];
 
-        assert_eq!(processed, expected_v7, "Error with v7 interleaving.");
+        assert_eq!(processed, expected_v7, "Error with v7 interleaving");
     }
 
-    // NOTE: this test will eventually need to be iterated on
-    // For now, use it to ensure normal execution up to the next todo!().
-    // // This test is not fully completed -> just comment/modify what's necessary to reflect the
-    // state of the program.
+    // TODO: expect bugs to debug wrt rxing; I don't know the API, so more investigation is needed
+    // to ensure a proper equality test.
+    //
+    // TODO TWICE: implement tests for each additional encoding mode implemented: byte, numeric,
+    // kanji
+    //
+    // TODO THRICE: move these encode/rendering tests below the bit-emplacement unit tests.
     #[test]
     fn test_encode_qr() {
         // Alphanumeric, version 1, ecc level Q
@@ -709,12 +728,83 @@ mod tests {
 
         assert_eq!(v7_version, 7);
 
+        // NOTE: THESE HAVE NOT BEEN RENDERED, SO THEY DO NOT HAVE A QUIET ZONE THAT NEEDS TO BE
+        // CORRECTED FOR FOR THE COMPARISON.
+        // THEY ARE ALSO NOT COMPLEMENTED, SO THIS CAN BE A 1:1 COMPARISON with RXING.
+
+        // HOWEVER, RXING's IMPLEMENTATION -DOES- ADD A 4 MODULE QUIET ZONE AND THIS NEEDS TO BE
+        // ACCOUNTED FOR IN THE COMPARISON LOOP.
+
         // Per the selection algorithm, this is returning mask 6
         let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        let enc_v1_mat = encoded_v1.matrix();
         // Per the selection algorithm, this is returning mask 0
         let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
+        let enc_v7_mat = encoded_v7.matrix();
 
-        todo!("Encode matrix expect cases for comparison.");
+        let qr_hints =
+            EncodeHints::default().with(EncodeHintValue::ErrorCorrection("Q".to_string()));
+        let n_v1 = enc_v1_mat.side_length();
+        let n_v7 = enc_v7_mat.side_length();
+        let qr_encoder = QRCodeWriter::default();
+        let format = BarcodeFormat::QR_CODE;
+        let expect_v1 = qr_encoder
+            .encode_with_hints(data, &format, n_v1 as i32, n_v1 as i32, &qr_hints)
+            .expect("V1 should encode and render correctly");
+
+        let expect_v7 = qr_encoder
+            .encode_with_hints(&v7_test, &format, n_v7 as i32, n_v7 as i32, &qr_hints)
+            .expect("V7 should encode and render correctly");
+
+        assert_eq!(
+            expect_v1.width() as usize,
+            n_v1 + 2 * QUIET_ZONE_SIZE,
+            "V1 Size discrepancy width"
+        );
+        assert_eq!(
+            expect_v1.height() as usize,
+            n_v1 + 2 * QUIET_ZONE_SIZE,
+            "V1 Size discrepancy height"
+        );
+
+        for i in 0..n_v1 {
+            for j in 0..n_v1 {
+                let (y, x) = ((i + QUIET_ZONE_SIZE) as u32, (j + QUIET_ZONE_SIZE) as u32);
+                // 1 = true = black for both encodings.
+                let lhs = enc_v1_mat.get(i, j).inner();
+                // GET IS REVERSED IN RXING -> it's using x = horizontal = column
+                let rhs = expect_v1.get(x as u32, y as u32);
+                assert_eq!(
+                    lhs, rhs,
+                    "V1 Bit discrepancy at i: {i}, j: {j}, x: {x}, y: {y}"
+                );
+            }
+        }
+
+        // This will crash - > the semantics are different.
+        assert_eq!(
+            expect_v7.width() as usize,
+            n_v7 + 2 * QUIET_ZONE_SIZE,
+            "V7 Size discrepancy width"
+        );
+        assert_eq!(
+            expect_v7.height() as usize,
+            n_v7 + 2 * QUIET_ZONE_SIZE,
+            "V7 Size discrepancy height"
+        );
+
+        for i in 0..n_v7 {
+            for j in 0..n_v7 {
+                let (y, x) = ((i + QUIET_ZONE_SIZE) as u32, (j + QUIET_ZONE_SIZE) as u32);
+                // 1 = true = black for both encodings.
+                let lhs = enc_v7_mat.get(i, j).inner();
+                let rhs = expect_v7.get(x, y);
+                assert_eq!(
+                    lhs, rhs,
+                    "V7 Bit discrepancy at i: {i}, j: {j} x: {x}, y: {y}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -737,46 +827,84 @@ mod tests {
         // Per the selection algorithm, this is returning mask 0
         let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
 
+        // Grab the side lengths before render (and adding the quiet zone)
+        // RXing's encoder appends the quiet zone to the final matrix, so this needs to be
+        // corrected for.
+        let n_v1 = encoded_v1.matrix().side_length();
+        let n_v7 = encoded_v7.matrix().side_length();
+
         // These are in -pixel- values, so they're complement QR values.
+        // They also add the quiet-zone size in their rendered size (like the rxing bitmatrices).
         let v1_bytes = encoded_v1.render();
         let v7_bytes = encoded_v7.render();
 
-        // This should be expected to be removed
-        // For now, inspection and manual verification is being used to tease out immediate errors.
-        eprintln!("V1 -------------");
-        let v1_s = v1_bytes.side_length();
-        for i in 0..v1_s {
-            for j in 0..v1_s {
-                match v1_bytes.get(i, j) {
-                    0 => eprint!("#"),
-                    // White is now 1 after rendering.
-                    1 => eprint!("_"),
-                    _ => unreachable!("This should only encode 1-bit color."),
-                }
-                eprint!(" ");
+        // The default ECC level is L (I believe), so this needs to be passed in to the rxing encoding.
+        let qr_hints =
+            EncodeHints::default().with(EncodeHintValue::ErrorCorrection("Q".to_string()));
+        let qr_encoder = QRCodeWriter::default();
+        let format = BarcodeFormat::QR_CODE;
+        let expect_v1 = qr_encoder
+            .encode_with_hints(data, &format, n_v1 as i32, n_v1 as i32, &qr_hints)
+            .expect("V1 should encode and render correctly");
+
+        let expect_v7 = qr_encoder
+            .encode_with_hints(&v7_test, &format, n_v7 as i32, n_v7 as i32, &qr_hints)
+            .expect("V7 should encode and render correctly");
+
+        let v1_bytes_side_len = v1_bytes.side_length() as u32;
+        assert_eq!(v1_bytes_side_len, expect_v1.width(), "V1 Width discrepancy");
+        assert_eq!(
+            v1_bytes_side_len,
+            expect_v1.height(),
+            "V1 Height discrepancy"
+        );
+
+        // V1 BYTE CHECK -> my render performs the complement, so these need to be
+        // complemented.
+        // Rxing returns boolean, so one of the two halves need to be cast.
+        // Both have a quiet zone, so no offset arithmetic is needed for the data comparison.
+
+        for i in 0..v1_bytes_side_len as usize {
+            for j in 0..v1_bytes_side_len as usize {
+                let lhs = *v1_bytes.get(i, j);
+                // Ensure it's only 1 bit.
+                assert!((0u8..=1).contains(&lhs));
+                let (x, y) = (j as u32, i as u32);
+                // Complement and then cast from boolean to u8
+                // RXING uses 1 = black = true until export
+                let rhs = !expect_v1.get(x, y) as u8;
+                assert_eq!(
+                    lhs, rhs,
+                    "V1 Bit discrepancy at i: {i}, j: {j}), x: {x}, y: {y}"
+                );
             }
-            eprintln!();
         }
-        eprintln!("V1 -------------");
-        eprintln!("V7 -------------");
-        let v7_s = v7_bytes.side_length();
 
-        for i in 0..v7_s {
-            for j in 0..v7_s {
-                match v7_bytes.get(i, j) {
-                    0 => eprint!("#"),
-                    // White is now 1 after rendering.
-                    1 => eprint!("_"),
-                    _ => unreachable!("This should only encode 1-bit color."),
-                }
-                eprint!(" ");
+        let v7_bytes_side_len = v7_bytes.side_length() as u32;
+
+        assert_eq!(v7_bytes_side_len, expect_v7.width(), "V1 Width discrepancy");
+        assert_eq!(
+            v7_bytes_side_len,
+            expect_v7.height(),
+            "V1 Height discrepancy"
+        );
+
+        // V7 BYTE CHECK.
+        for i in 0..v7_bytes_side_len as usize {
+            for j in 0..v7_bytes_side_len as usize {
+                let lhs = *v7_bytes.get(i, j);
+                // Ensure it's only 1 bit.
+                assert!((0u8..=1).contains(&lhs));
+                let (x, y) = (j as u32, i as u32);
+                // Complement and then cast from boolean to u8
+                // RXING uses 1 = black = true until export
+                let rhs = !expect_v7.get(x, y) as u8;
+                assert_eq!(
+                    lhs, rhs,
+                    "V7 Bit discrepancy at i: {i}, j: {j}), x: {x}, y: {y}"
+                );
             }
-            eprintln!();
         }
-
-        eprintln!("V7 -------------");
-
-        todo!("Create expect cases to compare each output.");
     }
 
     #[test]
@@ -807,7 +935,7 @@ mod tests {
         // - Sampling is implemented for SquareMatrix <u8>
         //      - it has not been tested
         // - A resampling routine with bounds-checking has not been implemented and needs to be.
-        todo!("Implement image-resampling to test sample_matrix method.");
+        todo!("Implement image-resampling to test SquareMatrix::sample_matrix.");
     }
 
     #[test]
@@ -978,5 +1106,186 @@ mod tests {
                 assert_eq!(mat[idx], expect[idx], "Mismatch at i: {i}, j: {j}");
             }
         }
+    }
+
+    // FURTHER ENCODING TESTS.
+    // For each of these, encode QR using rxing without any hints and let it select the "optimal"
+    // to tease out any issues with my selection implementations.
+    #[test]
+    fn test_qr_render_to_bytes_byte_mode() {
+        // ZXing/rxing's default error correction level is L
+        let test_string = "https://www.github.com/jordan-clayton/qr_writer";
+        run_render_test_ecc_l(test_string);
+    }
+
+    #[test]
+    fn test_qr_render_to_bytes_numeric_mode() {
+        // ZXing/rxing's default error correction level is L
+        // Taken from: https://www.thonky.com/qr-code-tutorial/numeric-mode-encoding
+        let test_string = "8675309";
+        run_render_test_ecc_l(test_string);
+    }
+
+    // TODO: this needs to provide kanji as an encoding hint.
+    #[cfg(feature = "kanji")]
+    #[test]
+    fn test_qr_render_to_bytes_kanji_mode() {
+        use encoding_rs::SHIFT_JIS;
+        // "Lol"
+        let data = "草";
+        // "Lolololololololololol"
+        let test_string = data.repeat(9);
+
+        // Make sure the code -does- encode properly using Shift JIS
+        let (_encode_string, enc, errors) = SHIFT_JIS.encode(&test_string);
+        assert!(!errors, "String expected to encode without issue.");
+        assert!(
+            enc == SHIFT_JIS,
+            "String expected to encode properly to JIS."
+        );
+
+        let encode_hints =
+            EncodeHints::default().with(EncodeHintValue::CharacterSet("Shift_JIS".to_string()));
+
+        run_render_test_ecc_l_with_encode_hints(&test_string, &encode_hints);
+    }
+
+    // TODO: mild refactor -> also allow provided ECC level (my enum).
+    // The ecc levels should match before sending the hints to rxing.
+    // This function should be modified once hints have been implemented in -this- api.
+    fn run_render_test_ecc_l_with_encode_hints(test_string: &str, encode_hints: &EncodeHints) {
+        let test_qr = encode_qr(test_string, ECCLevel::L);
+        let test_n = test_qr.matrix().side_length();
+        let test_render = test_qr.render();
+
+        let rx_encoder = QRCodeWriter;
+        let format = BarcodeFormat::QR_CODE;
+        let expect_render = rx_encoder
+            .encode_with_hints(
+                test_string,
+                &format,
+                test_n as i32,
+                test_n as i32,
+                encode_hints,
+            )
+            .expect("Rxing encoder should encode without issue.");
+
+        // This includes the quiet zone
+        let render_side_length = test_render.side_length() as u32;
+        assert_eq!(
+            render_side_length,
+            expect_render.height(),
+            "Height mismatch."
+        );
+        assert_eq!(render_side_length, expect_render.width(), "Width mismatch.");
+
+        // Byte comparison -> the rx matrix will be complement mine.
+        for i in 0..render_side_length as usize {
+            for j in 0..render_side_length as usize {
+                let lhs = *test_render.get(i, j);
+                let rhs = !expect_render.get(j as u32, i as u32) as u8;
+                assert_eq!(lhs, rhs, "Bit mismatch at i: {i}, j: {j}");
+            }
+        }
+    }
+
+    fn run_render_test_ecc_l(test_string: &str) {
+        let test_qr = encode_qr(test_string, ECCLevel::L);
+        let test_n = test_qr.matrix().side_length();
+        let test_render = test_qr.render();
+
+        let rx_encoder = QRCodeWriter;
+        let format = BarcodeFormat::QR_CODE;
+        let expect_render = rx_encoder
+            .encode(test_string, &format, test_n as i32, test_n as i32)
+            .expect("Rxing encoder should encode without issue.");
+
+        // This includes the quiet zone
+        let render_side_length = test_render.side_length() as u32;
+        assert_eq!(
+            render_side_length,
+            expect_render.height(),
+            "Height mismatch."
+        );
+        assert_eq!(render_side_length, expect_render.width(), "Width mismatch.");
+
+        // Byte comparison -> the rx matrix will be complement mine.
+        for i in 0..render_side_length as usize {
+            for j in 0..render_side_length as usize {
+                let lhs = *test_render.get(i, j);
+                let rhs = !expect_render.get(j as u32, i as u32) as u8;
+                assert_eq!(lhs, rhs, "Bit mismatch at i: {i}, j: {j}");
+            }
+        }
+    }
+
+    // Pick an arbitrarily large (but within the maximum limit) string of bytes for byte-mode
+    // encoding.
+    // The maximum byte-mode ECC L string is 2953 characters long.
+    #[test]
+    fn fuzz_test_qr() {
+        // Generic lipsum text.
+        // This is a kung-fu copy-paste job, and the string should be truncated into the maximum
+        // number of characters.
+        let lipsum = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor\n\n\
+            incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis\n\n\
+            nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n\n\
+            Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu\n\n\
+            fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in\n\n\
+            culpa qui officia deserunt mollit anim id est laborum.\n\n\
+            Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium\n\n\
+            doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore\n\n\
+            veritatis et quasi architecto beatae vitae dicta sunt explicabo. Nemo enim\n\n\
+            ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia\n\n\
+            consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt. Neque\n\n\
+            porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur,\n\n\
+            adipisci velit, sed quia non numquam eius modi tempora incidunt ut labore et\n\n\
+            dolore magnam aliquam quaerat voluptatem.\n\n\
+            Ut enim ad minima veniam, quis nostrum exercitationem ullam corporis suscipit\n\n\
+            laboriosam, nisi ut aliquid ex ea commodi consequatur. Quis autem vel eum iure\n\n\
+            reprehenderit qui in ea voluptate velit esse quam nihil molestiae consequatur,\n\n\
+            vel illum qui dolorem eum fugiat quo voluptas nulla pariatur. At vero eos et\n\n\
+            accusamus et iusto odio dignissimos ducimus qui blanditiis praesentium\n\n\
+            voluptatum deleniti atque corrupti quos dolores et quas molestias excepturi\n\n\
+            sint occaecati cupiditate non provident.\n\n\
+            Similique sunt in culpa qui officia deserunt mollitia animi, id est laborum et\n\n\
+            dolorum fuga. Et harum quidem rerum facilis est et expedita distinctio. Nam\n\n\
+            libero tempore, cum soluta nobis est eligendi optio cumque nihil impedit quo\n\n\
+            minus id quod maxime placeat facere possimus, omnis voluptas assumenda est,\n\n\
+            omnis dolor repellendus. Temporibus autem quibusdam et aut officiis debitis aut\n\n\
+            rerum necessitatibus saepe eveniet ut et voluptates repudiandae sint et\n\n\
+            molestiae non recusandae.\n\n\
+            Itaque earum rerum hic tenetur a sapiente delectus, ut aut reiciendis\n\n\
+            voluptatibus maiores alias consequatur aut perferendis doloribus asperiores\n\n\
+            repellat. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do\n\n\
+            eiusmod tempor incididunt ut labore et dolore magna aliqua. Proin nibh nisl\n\n\
+            condimentum id venenatis a condimentum vitae. Amet justo donec enim diam\n\n\
+            vulputate ut pharetra sit. Nunc id cursus metus aliquam eleifend mi in nulla.\n\n\
+            Tincidunt id aliquet risus feugiat in ante metus dictum at. Felis eget nunc lobortis\n\n\
+            mattis aliquam faucibus purus in massa. Pretium lectus quam id leo in vitae turpis massa sed.\n\n\
+            Tincidunt id aliquet risus feugiat in ante metus dictum at. Felis eget nunc lobortis\n\n\
+            mattis aliquam faucibus purus in massa. Pretium lectus quam id leo in vitae turpis massa sed.\n\n\
+            Tincidunt id aliquet risus feugiat in ante metus dictum at. Felis eget nunc lobortis\n\n\
+            mattis aliquam faucibus purus in massa. Pretium lectus quam id leo in vitae turpis massa sed.
+            ";
+
+        let diff = (2953 as i32 - lipsum.len() as i32).abs() as usize;
+        let lipref = &lipsum[0..lipsum.len() - diff];
+        assert_eq!(lipref.len(), 2953);
+
+        // This string falls within the boundaries and -should not panic-
+        run_render_test_ecc_l(lipref);
+
+        // This string falls outside boundaries (too long) and should panic RIGHT NOW
+        // until cleanup.
+
+        let res = std::panic::catch_unwind(|| {
+            run_render_test_ecc_l(lipsum);
+        });
+
+        assert!(
+            res.is_err(),
+            "Encoding succeded with invalid version level."
+        );
     }
 }
