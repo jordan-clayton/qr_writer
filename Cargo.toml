@@ -8,14 +8,16 @@ bitvec = "1.0.1"
 encoding_rs = {version = "0.8.35", optional = true}
 itertools = "0.14.0"
 regex = "1.12.4"
-image = {version = "0.25.8", optional = true}
+image = { version = "0.25.8", optional = true }
+svg = {version = "0.18.0", optional = true}
 
 [features]
 # TODO: get rid of this after impl written
-# Kanji should be opt-in only
-default = ["kanji"]
+# Kanji should be opt-in only, as with image
+default = ["image", "svg"]
 kanji = ["dep:encoding_rs"]
 image = ["dep:image"]
+svg = ["dep:svg"]
 
 [dev-dependencies]
 rxing = "0.9.1"

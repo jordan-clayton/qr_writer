@@ -3,6 +3,8 @@
 #![recursion_limit = "512"]
 mod ecc;
 mod encoding;
+#[cfg(any(feature = "image", feature = "svg"))]
+mod export;
 mod galois;
 mod mask;
 mod matrix;
@@ -12,9 +14,12 @@ mod tables;
 mod versioning;
 
 // These are basically the extent of what's required to gain value from this api.
+// (This will change once mask/version hints are implemented)
 pub use ecc::ECCLevel;
 pub use matrix::QRCodeMatrix;
 pub use qr::encode_qr;
+
+// TODO: once image exporting has been implemented, feature-gate expose what's necessary.
 
 // TODO: consider moving the galois tests/other module tests to their respective modules (if/where
 // possible) and reduce visibility where sensible.
@@ -55,11 +60,6 @@ mod tests {
     use rxing::{BarcodeFormat, EncodeHintValue, EncodeHints, Writer};
 
     // TESTS TO STILL BE IMPLEMENTED:
-    // - Expect cases for test_encode_qr: these should be retrieved from a source verified to be
-    // correct
-    //      - i.e. use ZXing
-    //      - (bring in rxing as a developer dependency and generate test cases)
-    //
     // - Unit tests for the penalty functions
     // - Unit tests for resize/resampling
 
