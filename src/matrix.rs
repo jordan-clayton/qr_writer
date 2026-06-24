@@ -231,14 +231,19 @@ impl SquareMatrix<u8> {
 
     // This might be handled elsewhere, but can be used for re-interpolating
     // a QR (in texels/modules) into larger squares.
+    // This is a basic resampling and will not work well for fractional scaling.
+    // Nearest neighbor will work considerably better, but a reader should have little trouble
+    // picking up the code (so long as it's of sufficient size for the scanning distance).
     pub fn sample_matrix(&self, i: usize, j: usize, img_side_length: usize) -> u8 {
-        // Get the normalized coordinates.
+        let n = self.side_length;
+
         let u = (j + 1) as f32 / img_side_length as f32;
         let v = (i + 1) as f32 / img_side_length as f32;
 
-        let tex_u = ((self.side_length - 1) as f32 * u) as usize;
-        let tex_v = ((self.side_length - 1) as f32 * v) as usize;
-        *self.get(tex_v, tex_u)
+        let i0 = (v * (n - 1) as f32).round() as usize;
+        let j0 = (u * (n - 1) as f32).round() as usize;
+
+        *self.get(i0, j0)
     }
 }
 

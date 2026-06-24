@@ -19,14 +19,10 @@ pub use ecc::ECCLevel;
 pub use matrix::QRCodeMatrix;
 pub use qr::encode_qr;
 
-// TODO: once image exporting has been implemented, feature-gate expose what's necessary.
+// TODO: once image exporting has been fully implemented, feature-gate expose what's necessary.
 
 // TODO: consider moving the galois tests/other module tests to their respective modules (if/where
 // possible) and reduce visibility where sensible.
-//
-// TODO: more test cases can (and should) be generated using:
-// https://www.nayuki.io/page/creating-a-qr-code-step-by-step
-// - (and rxing to generate programmatically)
 //
 // TODO: cleanup -> Format strings should either all have ending punctuation or none.
 //      + additional cleaning to make these tests easier to read.
@@ -52,9 +48,9 @@ mod tests {
     use crate::versioning::get_min_required_version;
 
     #[cfg(any(feature = "image", feature = "svg"))]
-    use crate::export::resize;
+    use crate::export::{nearest_integer_multiple, resize};
     #[cfg(feature = "image")]
-    use crate::export::save_png;
+    use crate::export::{save_png, save_png_integer_scaling};
     #[cfg(any(feature = "image", feature = "svg"))]
     use std::path::{Path, PathBuf};
     // save_svg currently calls the render_svg_without_resampling internally
@@ -72,6 +68,8 @@ mod tests {
     // NOTE: these are still complemented internally (0 = false = white)
     // so these will need to be complemented on comparison.
     use rxing::common::BitMatrix;
+    #[cfg(feature = "svg")]
+    use rxing::qrcode::common::ErrorCorrectionLevel::L;
     use rxing::{BarcodeFormat, EncodeHintValue, EncodeHints, Writer};
 
     // This will only be used if the image/svg crates are pulled in.
@@ -975,13 +973,85 @@ mod tests {
         // -- and better done with proper interpolation from the image crate.
         // This resampling only does a basic linear interpolation using normalized coordinates.
         let img_10p5x = img_dir.join("hello_world_10p5x.png");
-        let fract_side_length = (side_len as f32 * 1.5).floor() as usize;
+        let fract_side_length = (side_len as f32 * 10.5).floor() as usize;
         let res_3 = save_png(&img_10p5x, &rendered, Some(fract_side_length));
 
         assert!(
             res_3.is_ok(),
             "Failed to write image correctly at 1.5x scale. Error: {:?}.",
             res_3.err()
+        );
+
+        // Test 20.75 with ratio preservation (integer scaling)
+        let img_20p75x = img_dir.join("hello_world_21x.png");
+        // This should get rounded up to 11.
+        // This will be (33 * 21 = 693)px * 693 px in size
+        let fract_side_length = (side_len as f32 * 20.75).floor() as usize;
+        let res_4 = save_png_integer_scaling(&img_20p75x, &rendered, Some(fract_side_length));
+        assert!(
+            res_4.is_ok(),
+            "Failed to write image correctly at 20.75x -> 21x scale. Error: {:?}",
+            res_4.err()
+        );
+    }
+
+    #[cfg(any(feature = "svg", feature = "png"))]
+    fn test_nearest_integer() {
+        let old_len = 21 as usize;
+        let new_len_greater = (21f32 * 10.50).floor() as usize;
+
+        let nearest_pos = nearest_integer_multiple(old_len, new_len_greater);
+        assert!(
+            nearest_pos.is_positive(),
+            "nearest integer returning negative instead of positive."
+        );
+
+        assert_eq!(nearest_pos, 11, "Calculation is off in nearest positive.");
+
+        let old_len = 210;
+        let new_len = 21;
+        let nearest_neg = nearest_integer_multiple(old_len, new_len);
+        assert!(
+            nearest_neg.is_negative(),
+            "nearest integer returning positive instead of negative."
+        );
+
+        assert_eq!(nearest_neg, -10, "Calculation is off in nearest positive.");
+
+        let old_len = 21;
+        let new_len = (old_len as f32 * 10.5).floor() as usize;
+
+        let nearest_fract_pos = nearest_integer_multiple(old_len, new_len);
+        assert!(
+            nearest_fract_pos.is_positive(),
+            "Fractional positive returning negative"
+        );
+
+        assert_eq!(
+            nearest_fract_pos, 11,
+            "Nearest integer calculation is off in nearest fractional positive."
+        );
+
+        let old_len = 210;
+        let new_len = (0.75 * old_len as f32).floor() as usize;
+        let expect_len = 105;
+
+        let nearest_fract_neg = nearest_integer_multiple(old_len, new_len);
+
+        assert!(
+            nearest_fract_neg.is_negative(),
+            "Fractional negative returning positive."
+        );
+
+        assert_eq!(
+            nearest_fract_neg, -2,
+            "Nearest integer calculation is off in nearest fractional negative."
+        );
+
+        let test_len = old_len / nearest_fract_neg.abs() as usize;
+        assert_eq!(
+            test_len, expect_len,
+            "Nearest integer returning wrong multiplicand magnitude"
         );
     }
 
@@ -1014,16 +1084,16 @@ mod tests {
 
         // Run an svg export with 2x scaling without resampling
         let img_10x_no_resample = img_dir.join("hello_world_10x_no_resample.svg");
-        let res_2 = save_svg(&img_10x_no_resample, &rendered, Some(side_length * 2));
+        let res_2 = save_svg(&img_10x_no_resample, &rendered, Some(side_length * 10));
         assert!(
             res_2.is_ok(),
             "Failed to write image correctly at 1x scale. Error: {:?}",
             res_2.err()
         );
 
-        // Run an svg export with 2x scaling with resampling
+        // Run an svg export with 10x scaling with resampling
         let img_10x_with_resample = img_dir.join("hello_world_10x_with_resample.svg");
-        let svg = render_svg_with_resampling(&rendered, Some(side_length * 2));
+        let svg = render_svg_with_resampling(&rendered, Some(side_length * 10));
         let res_3 = write_svg(&img_10x_with_resample, &svg);
 
         assert!(
