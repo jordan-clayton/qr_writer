@@ -254,6 +254,9 @@ impl SquareMatrix<Module> {
 }
 
 // TODO: MIGRATE THIS TO A DIFFERENT FILE -> this should be within qr or similar.
+// TODO: determine how best to work with the render/resampling.
+//  - Could be an enumeration
+//  - Could be generic over T with restricted impl blocks.
 pub struct QRCodeMatrix {
     // TODO: decide whether to make this concrete over u8 instead instead of Module.
     // The module semantics are useful for construction and inspection, but they aren't and

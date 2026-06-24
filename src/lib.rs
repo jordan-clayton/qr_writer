@@ -51,13 +51,32 @@ mod tests {
     use crate::tables::*;
     use crate::versioning::get_min_required_version;
 
-    // To encode the -actual- qr code
+    #[cfg(any(feature = "image", feature = "svg"))]
+    use crate::export::resize;
+    #[cfg(feature = "image")]
+    use crate::export::save_png;
+    #[cfg(any(feature = "image", feature = "svg"))]
+    use std::path::{Path, PathBuf};
+    // save_svg currently calls the render_svg_without_resampling internally
+    // Expect this to be changed--render_svg_with_resampling may be removed if
+    // the svg scaling is superior than a texture buffer resample (it most likely will be).
+    // Testing is currently being used to become familiar with svg format and how it handles
+    // scaling.
+    #[cfg(feature = "svg")]
+    use crate::export::{render_svg_with_resampling, save_svg, write_svg};
+
+    // Using rxing to generate test cases for comparison against the encoder in this library.
     use rxing::qrcode::QRCodeWriter;
+
     // To access the output data and access bits
     // NOTE: these are still complemented internally (0 = false = white)
     // so these will need to be complemented on comparison.
     use rxing::common::BitMatrix;
     use rxing::{BarcodeFormat, EncodeHintValue, EncodeHints, Writer};
+
+    // This will only be used if the image/svg crates are pulled in.
+    #[cfg(any(feature = "image", feature = "svg"))]
+    const IMG_DIRECTORY_SLUG: &str = "test_images";
 
     // TESTS TO STILL BE IMPLEMENTED:
     // - Unit tests for the penalty functions
@@ -907,35 +926,111 @@ mod tests {
         }
     }
 
+    // --- IMAGE EXPORTING ----
+
+    // This tests the image resampling for export to png
+    // If it completes, consider it "mostly correct."
+    // The resampling is difficult to automate; determine pixel discrepancies by examining
+    // the output in CARGO_MANIFEST_DIR/test_images/
+    #[cfg(feature = "image")]
     #[test]
-    fn test_qr_render_resample() {
+    fn test_qr_render_png_with_resample() {
         // Alphanumeric, version 1, ecc level Q
         let data = "HELLO WORLD";
 
-        // Note -> this doesn't emplace spaces between each "HELLO WORLD"
-        // The v7_string should be:
-        // HELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLD
-        // -> test this with existing online encoders and compare by inspection until the full
-        // implementation is complete and can be automated.
-        let v7_test = data.repeat(11);
-        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+        // Per the selection algorithm, this is returning mask 6
+        let encoded_v1 = encode_qr(data, ECCLevel::Q);
 
-        assert_eq!(v7_version, 7);
+        let rendered = encoded_v1.render();
+
+        // Make the file path
+        let crate_dir = env!("CARGO_MANIFEST_DIR");
+
+        let img_dir = Path::new(crate_dir).join(IMG_DIRECTORY_SLUG);
+
+        let img_1x = img_dir.join("hello_world_1x.png");
+        let side_len = rendered.side_length();
+        // Test 1x (image export)
+        let res_1 = save_png(&img_1x, &rendered, None);
+
+        assert!(
+            res_1.is_ok(),
+            "Failed to write image correctly at 1x scale. Error: {:?}.",
+            res_1.err()
+        );
+
+        // Test 10x (resize) -> Expect this to be 210 x 210 px in length.
+        let img_10x = img_dir.join("hello_world_10x.png");
+        let res_2 = save_png(&img_10x, &rendered, Some(side_len * 10));
+
+        assert!(
+            res_2.is_ok(),
+            "Failed to write image correctly at 2x scale. Error: {:?}.",
+            res_2.err()
+        );
+
+        // Test 10.5x (resize with fractional scaling) -> expect this to be 220 px in length.
+        // -- not encouraged, but may still produce a working QR code
+        // -- ideally scaling should be done with svg
+        // -- and better done with proper interpolation from the image crate.
+        // This resampling only does a basic linear interpolation using normalized coordinates.
+        let img_10p5x = img_dir.join("hello_world_10p5x.png");
+        let fract_side_length = (side_len as f32 * 1.5).floor() as usize;
+        let res_3 = save_png(&img_10p5x, &rendered, Some(fract_side_length));
+
+        assert!(
+            res_3.is_ok(),
+            "Failed to write image correctly at 1.5x scale. Error: {:?}.",
+            res_3.err()
+        );
+    }
+
+    // This tests svg export + exporting svg after running with basic linear resampling.
+    #[cfg(feature = "svg")]
+    #[test]
+    fn test_qr_render_svg_with_resample() {
+        // Alphanumeric, version 1, ecc level Q
+        let data = "HELLO WORLD";
 
         // Per the selection algorithm, this is returning mask 6
         let encoded_v1 = encode_qr(data, ECCLevel::Q);
-        // Per the selection algorithm, this is returning mask 0
-        let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
 
-        // These are in -pixel- values, so they're complement QR values.
-        let v1_bytes = encoded_v1.render();
-        let v7_bytes = encoded_v7.render();
+        let rendered = encoded_v1.render();
+        let side_length = rendered.side_length();
 
-        // This has yet to be designed in full
-        // - Sampling is implemented for SquareMatrix <u8>
-        //      - it has not been tested
-        // - A resampling routine with bounds-checking has not been implemented and needs to be.
-        todo!("Implement image-resampling to test SquareMatrix::sample_matrix.");
+        // Make the file path
+        let crate_dir = env!("CARGO_MANIFEST_DIR");
+
+        let img_dir = Path::new(crate_dir).join(IMG_DIRECTORY_SLUG);
+
+        // Run an svg export with zero resampling
+        let img_1x = img_dir.join("hello_word_1x.svg");
+        let res_1 = save_svg(&img_1x, &rendered, None);
+        assert!(
+            res_1.is_ok(),
+            "Failed to write image correctly at 1x scale. Error: {:?}",
+            res_1.err()
+        );
+
+        // Run an svg export with 2x scaling without resampling
+        let img_10x_no_resample = img_dir.join("hello_world_10x_no_resample.svg");
+        let res_2 = save_svg(&img_10x_no_resample, &rendered, Some(side_length * 2));
+        assert!(
+            res_2.is_ok(),
+            "Failed to write image correctly at 1x scale. Error: {:?}",
+            res_2.err()
+        );
+
+        // Run an svg export with 2x scaling with resampling
+        let img_10x_with_resample = img_dir.join("hello_world_10x_with_resample.svg");
+        let svg = render_svg_with_resampling(&rendered, Some(side_length * 2));
+        let res_3 = write_svg(&img_10x_with_resample, &svg);
+
+        assert!(
+            res_3.is_ok(),
+            "Failed to write image correctly at 1x scale. Error: {:?}",
+            res_3.err()
+        );
     }
 
     #[test]
@@ -1108,7 +1203,7 @@ mod tests {
         }
     }
 
-    // FURTHER ENCODING TESTS.
+    // -------------------------FURTHER ENCODING TESTS.
     // For each of these, encode QR using rxing without any hints and let it select the "optimal"
     // to tease out any issues with my selection implementations.
     #[test]
