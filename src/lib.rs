@@ -1,6 +1,3 @@
-// Galois compile-time tables are computed recursively, so the stack limit needs to be doubled.
-// TODO: refactor const table generators into while loops and remove the recursion limit (back to 128).
-#![recursion_limit = "512"]
 mod ecc;
 mod encoding;
 #[cfg(any(feature = "png", feature = "image", feature = "svg"))]
@@ -16,14 +13,17 @@ mod versioning;
 // These are basically the extent of what's required to gain value from this api.
 // (This will change once mask/version hints are implemented)
 pub use ecc::ECCLevel;
+#[cfg(any(feature = "image", feature = "png"))]
+pub use export::render_image;
+#[cfg(feature = "png")]
+pub use export::save_png;
+#[cfg(any(feature = "png", feature = "image", feature = "svg"))]
+pub use export::{IntegerInverse, nearest_integer_multiple};
+#[cfg(feature = "svg")]
+pub use export::{Stroke, SvgHints, SvgRectHints, save_svg};
 pub use matrix::QRCodeMatrix;
 pub use qr::encode_qr;
 
-// TODO: once image exporting has been fully implemented, feature-gate expose what's necessary.
-
-// TODO: consider moving the galois tests/other module tests to their respective modules (if/where
-// possible) and reduce visibility where sensible.
-//
 // TODO: cleanup -> Format strings should either all have ending punctuation or none.
 //      + additional cleaning to make these tests easier to read.
 #[cfg(test)]

@@ -31,8 +31,29 @@ const fn compute_gf_256_log_tables() -> ([usize; FIELD_SIZE], [usize; FIELD_SIZE
     let mut exp = [0usize; FIELD_SIZE];
     let mut log = [0usize; FIELD_SIZE];
 
-    fill_exp_rec(&mut exp, 1, 0);
-    fill_log_rec(&mut log, &exp, 0);
+    let mut x = 1usize;
+    let mut i = 0usize;
+
+    while i < FIELD_SIZE {
+        exp[i] = x;
+        x *= 2;
+
+        if x >= 256 {
+            x ^= IRR_POLY;
+            x &= REM;
+        }
+
+        i += 1;
+    }
+
+    i = 0;
+
+    // ExpTable and LogTable have equal size
+    while i < FIELD_SIZE - 1 {
+        let idx = exp[i];
+        log[idx] = i;
+        i += 1;
+    }
 
     // Log[0] is undefined. It's pre-initialized to 0 and should never be touched in the actual
     // computation.
@@ -41,35 +62,6 @@ const fn compute_gf_256_log_tables() -> ([usize; FIELD_SIZE], [usize; FIELD_SIZE
     }
 
     (exp, log)
-}
-
-// CLEANUP TODO: apparently while-loops are legal in constant functions as of 2018
-// Refactor the recursion into iteration and remove the recursion limit increase.
-// Iterators aren't stable yet in constant evaluation.
-// 256 is a small enough size that the recursion should be fine if the limit is bumped.
-// See: lib.rs; recursion limit is currently set to 512.
-const fn fill_exp_rec(exp: &mut [usize; FIELD_SIZE], mut x: usize, i: usize) {
-    if i >= FIELD_SIZE {
-        return;
-    }
-    exp[i] = x;
-    x *= 2;
-
-    if x >= 256 {
-        x ^= IRR_POLY;
-        x &= REM;
-    }
-
-    fill_exp_rec(exp, x, i + 1);
-}
-
-const fn fill_log_rec(log: &mut [usize; FIELD_SIZE], exp: &[usize; FIELD_SIZE], i: usize) {
-    if i >= REM {
-        return;
-    }
-
-    log[exp[i]] = i;
-    fill_log_rec(log, exp, i + 1);
 }
 
 // It would be nice if tuple-unpacking could happen at compile time, hopefully one day :<
