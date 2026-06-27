@@ -48,9 +48,9 @@ mod tests {
     use crate::versioning::get_min_required_version;
 
     #[cfg(any(feature = "image", feature = "svg"))]
-    use crate::export::{nearest_integer_multiple, resize};
+    use crate::export::{IntegerInverse, nearest_integer_multiple};
     #[cfg(feature = "image")]
-    use crate::export::{save_png, save_png_integer_scaling};
+    use crate::export::{resize_and_render_image_exact, save_png, write_png};
     #[cfg(any(feature = "image", feature = "svg"))]
     use std::path::{Path, PathBuf};
     // save_svg currently calls the render_svg_without_resampling internally
@@ -59,7 +59,9 @@ mod tests {
     // Testing is currently being used to become familiar with svg format and how it handles
     // scaling.
     #[cfg(feature = "svg")]
-    use crate::export::{render_svg_with_resampling, save_svg, write_svg};
+    use crate::export::{
+        Stroke, SvgHints, SvgRectHints, render_svg_with_resampling, save_svg, write_svg,
+    };
 
     // Using rxing to generate test cases for comparison against the encoder in this library.
     use rxing::qrcode::QRCodeWriter;
@@ -974,7 +976,12 @@ mod tests {
         // This resampling only does a basic linear interpolation using normalized coordinates.
         let img_10p5x = img_dir.join("hello_world_10p5x.png");
         let fract_side_length = (side_len as f32 * 10.5).floor() as usize;
-        let res_3 = save_png(&img_10p5x, &rendered, Some(fract_side_length));
+
+        let res_3 = {
+            let (png, _is_fract) =
+                resize_and_render_image_exact(&rendered, Some(fract_side_length));
+            write_png(&img_10p5x, &png)
+        };
 
         assert!(
             res_3.is_ok(),
@@ -987,7 +994,7 @@ mod tests {
         // This should get rounded up to 11.
         // This will be (33 * 21 = 693)px * 693 px in size
         let fract_side_length = (side_len as f32 * 20.75).floor() as usize;
-        let res_4 = save_png_integer_scaling(&img_20p75x, &rendered, Some(fract_side_length));
+        let res_4 = save_png(&img_20p75x, &rendered, Some(fract_side_length));
         assert!(
             res_4.is_ok(),
             "Failed to write image correctly at 20.75x -> 21x scale. Error: {:?}",
@@ -995,42 +1002,42 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "svg", feature = "png"))]
+    #[cfg(any(feature = "svg", feature = "image"))]
     fn test_nearest_integer() {
         let old_len = 21 as usize;
         let new_len_greater = (21f32 * 10.50).floor() as usize;
 
         let nearest_pos = nearest_integer_multiple(old_len, new_len_greater);
-        assert!(
-            nearest_pos.is_positive(),
-            "nearest integer returning negative instead of positive."
-        );
 
-        assert_eq!(nearest_pos, 11, "Calculation is off in nearest positive.");
+        if let IntegerInverse::Multiply(nearest_pos) = nearest_pos {
+            assert_eq!(nearest_pos, 11, "Calculation is off in nearest positive.");
+        } else {
+            panic!("nearest integer returning divide instead of multiply.");
+        }
 
         let old_len = 210;
         let new_len = 21;
         let nearest_neg = nearest_integer_multiple(old_len, new_len);
-        assert!(
-            nearest_neg.is_negative(),
-            "nearest integer returning positive instead of negative."
-        );
 
-        assert_eq!(nearest_neg, -10, "Calculation is off in nearest positive.");
+        if let IntegerInverse::Divide(nearest_neg) = nearest_neg {
+            assert_eq!(nearest_neg, 10, "Calculation is off in nearest, divide.");
+        } else {
+            panic!("nearest integer returning multiply instead of divide.");
+        }
 
         let old_len = 21;
         let new_len = (old_len as f32 * 10.5).floor() as usize;
 
         let nearest_fract_pos = nearest_integer_multiple(old_len, new_len);
-        assert!(
-            nearest_fract_pos.is_positive(),
-            "Fractional positive returning negative"
-        );
 
-        assert_eq!(
-            nearest_fract_pos, 11,
-            "Nearest integer calculation is off in nearest fractional positive."
-        );
+        if let IntegerInverse::Multiply(nearest_fract_pos) = nearest_fract_pos {
+            assert_eq!(
+                nearest_fract_pos, 11,
+                "Nearest integer calculation is off in nearest fractional multiply."
+            );
+        } else {
+            panic!("nearest integer fract returning divide instead of multiply.");
+        }
 
         let old_len = 210;
         let new_len = (0.75 * old_len as f32).floor() as usize;
@@ -1038,21 +1045,20 @@ mod tests {
 
         let nearest_fract_neg = nearest_integer_multiple(old_len, new_len);
 
-        assert!(
-            nearest_fract_neg.is_negative(),
-            "Fractional negative returning positive."
-        );
+        if let IntegerInverse::Divide(nearest_fract_neg) = nearest_fract_neg {
+            assert_eq!(
+                nearest_fract_neg, 2,
+                "Nearest integer calculation is off in nearest fractional divide."
+            );
 
-        assert_eq!(
-            nearest_fract_neg, -2,
-            "Nearest integer calculation is off in nearest fractional negative."
-        );
-
-        let test_len = old_len / nearest_fract_neg.abs() as usize;
-        assert_eq!(
-            test_len, expect_len,
-            "Nearest integer returning wrong multiplicand magnitude"
-        );
+            let test_len = old_len / nearest_fract_neg;
+            assert_eq!(
+                test_len, expect_len,
+                "Nearest integer returning wrong magnitude"
+            );
+        } else {
+            panic!("nearest integer returning multiply instead of divide.");
+        }
     }
 
     // This tests svg export + exporting svg after running with basic linear resampling.
@@ -1075,7 +1081,7 @@ mod tests {
 
         // Run an svg export with zero resampling
         let img_1x = img_dir.join("hello_word_1x.svg");
-        let res_1 = save_svg(&img_1x, &rendered, None);
+        let res_1 = save_svg(&img_1x, &rendered, None, None);
         assert!(
             res_1.is_ok(),
             "Failed to write image correctly at 1x scale. Error: {:?}",
@@ -1084,7 +1090,12 @@ mod tests {
 
         // Run an svg export with 2x scaling without resampling
         let img_10x_no_resample = img_dir.join("hello_world_10x_no_resample.svg");
-        let res_2 = save_svg(&img_10x_no_resample, &rendered, Some(side_length * 10));
+        let res_2 = save_svg(
+            &img_10x_no_resample,
+            &rendered,
+            Some(side_length * 10),
+            None,
+        );
         assert!(
             res_2.is_ok(),
             "Failed to write image correctly at 1x scale. Error: {:?}",
@@ -1093,13 +1104,63 @@ mod tests {
 
         // Run an svg export with 10x scaling with resampling
         let img_10x_with_resample = img_dir.join("hello_world_10x_with_resample.svg");
-        let svg = render_svg_with_resampling(&rendered, Some(side_length * 10));
+        let svg = render_svg_with_resampling(&rendered, Some(side_length * 10), None);
         let res_3 = write_svg(&img_10x_with_resample, &svg);
 
         assert!(
             res_3.is_ok(),
             "Failed to write image correctly at 1x scale. Error: {:?}",
             res_3.err()
+        );
+    }
+
+    #[cfg(feature = "svg")]
+    #[test]
+    fn test_qr_render_svg_with_hints() {
+        let data = "HELLO WORLD";
+        let encoded = encode_qr(data, ECCLevel::Q);
+
+        let render = encoded.render();
+
+        // Make the file path
+        let crate_dir = env!("CARGO_MANIFEST_DIR");
+
+        let img_dir = Path::new(crate_dir).join(IMG_DIRECTORY_SLUG);
+
+        // Run an svg export with zero resampling
+        let img_crisp = img_dir.join("hello_word_crisp_edges.svg");
+
+        let img_hints = img_dir.join("hello_world_squircle.svg");
+
+        // Test turning off subpixel rendering/antialiasing
+        let mut hints = SvgHints::default();
+        hints.shape_rendering = Some("crispEdges");
+
+        let side_length = Some(210);
+        let res_1 = save_svg(&img_crisp, &render, side_length, Some(hints));
+        assert!(
+            res_1.is_ok(),
+            "Failed to write image with no antialiasing. Error: {:?}",
+            res_1.err()
+        );
+
+        // Test corner radii for rounded-corner QR pixels.
+
+        let mut hints = SvgHints::default();
+        hints.shape_rendering = None;
+
+        let mut pixel_hints = SvgRectHints::default();
+        let corner_radius = "2";
+        pixel_hints.rx = Some(corner_radius);
+        pixel_hints.ry = Some(corner_radius);
+        hints.pixel_hints = Some(pixel_hints);
+
+        let res_2 = save_svg(&img_hints, &render, side_length, Some(hints));
+
+        assert!(
+            res_2.is_ok(),
+            "Failed to write image with hints. Error: {:?}",
+            res_2.err()
         );
     }
 

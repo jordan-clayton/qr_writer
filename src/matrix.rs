@@ -229,6 +229,30 @@ impl SquareMatrix<u8> {
         (mat, side_length)
     }
 
+    // TODO: work this into a proper docstring.
+    // For best results, the new side length should be an integer multiple of the original matrix side
+    // length (i.e. use this to perform integer scaling)
+    // It is ill-advised to resize to a size smaller than the minimum required side length for the QR
+    // It is also ill-advised to resize a resized QR code. Since this function returns a new
+    // SquareMatrix<u8> the original will not be dropped--resize from the original matrix
+    // returned from QRCodeMatrix::render().
+    // If you require fine-control over scaling, prefer exporting to svg.
+    //
+    // The minimum side length, s: (((v-1) * 4) + 21), where v is the version (counting from 1)
+    // TODO: guard against this; abstract over SquareMatrix<u8> and append the QR version.
+    // TODO TWICE: refactor this to return a result if the new side length is smaller than the
+    // original.
+    pub fn resize(&self, new_side_length: usize) -> SquareMatrix<u8> {
+        let mut out_mat = SquareMatrix::new(new_side_length);
+        for i in 0..new_side_length {
+            for j in 0..new_side_length {
+                *out_mat.get_mut(i, j) = self.sample_matrix(i, j, new_side_length);
+            }
+        }
+
+        out_mat
+    }
+
     // This might be handled elsewhere, but can be used for re-interpolating
     // a QR (in texels/modules) into larger squares.
     // This is a basic nearest-neighbor sampling of the matrix

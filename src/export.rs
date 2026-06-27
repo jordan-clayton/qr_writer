@@ -1,4 +1,3 @@
-// TODO: image and svg export.
 use crate::matrix::SquareMatrix;
 use std::path::Path;
 #[cfg(feature = "svg")]
@@ -9,48 +8,50 @@ use svg::node::element::Rectangle;
 #[cfg(feature = "image")]
 use image::{DynamicImage, GrayImage, ImageFormat, Luma};
 
-// TODO: clean up the png export to use proper filtering to handle scaling situations.
-
-// Basic resize/resampling functions
-
-// TODO: work this into a proper docstring.
-// For best results, the new side length should be an integer multiple of the original matrix side
-// length (i.e. use this to perform integer scaling)
-// It is ill-advised to resize to a size smaller than the minimum required side length for the QR
-// It is also ill-advised to resize a resized QR code. Since this function returns a new
-// SquareMatrix<u8> the original will not be dropped--resize from the original matrix
-// returned from QRCodeMatrix::render().
-// If you require fine-control over scaling, prefer exporting to svg.
-//
-// The minimum side length, s: (((v-1) * 4) + 21), where v is the version (counting from 1)
-// TODO: guard against this; abstract over SquareMatrix<u8> and append the QR version.
-// TODO TWICE: refactor this to return a result if the new side length is smaller than the
-// original.
-#[cfg(any(feature = "svg", feature = "image"))]
-pub fn resize(matrix: &SquareMatrix<u8>, new_side_length: usize) -> SquareMatrix<u8> {
-    let mut out_mat = SquareMatrix::new(new_side_length);
-    for i in 0..new_side_length {
-        for j in 0..new_side_length {
-            *out_mat.get_mut(i, j) = matrix.sample_matrix(i, j, new_side_length);
-        }
-    }
-
-    out_mat
+pub enum IntegerInverse {
+    Divide(usize),
+    Multiply(usize),
 }
 
 // This is a convenience function to avoid fractional scaling
-// Negative numbers indicate "divide" the old len by the absolute value of this number.
-// Positive numbers indicate "multiply" the old len by this number.
 #[inline]
-#[cfg(any(feature = "svg", feature = "image"))]
-pub fn nearest_integer_multiple(old_side_length: usize, new_side_length: usize) -> i32 {
+pub fn nearest_integer_multiple(old_side_length: usize, new_side_length: usize) -> IntegerInverse {
     if new_side_length < old_side_length {
-        -((old_side_length as f32 / new_side_length as f32).ceil() as i32)
+        let n = (old_side_length as f32 / new_side_length as f32).ceil() as usize;
+        IntegerInverse::Divide(n)
     } else if new_side_length > old_side_length {
-        (new_side_length as f32 / old_side_length as f32).ceil() as i32
+        let n = (new_side_length as f32 / old_side_length as f32).ceil() as usize;
+        IntegerInverse::Multiply(n)
     } else {
-        1
+        IntegerInverse::Multiply(1)
     }
+}
+
+// --------- SVG ----------
+
+#[cfg(feature = "svg")]
+#[derive(Copy, Clone, Default)]
+pub struct SvgHints<'a> {
+    pub background_color: Option<&'a str>,
+    // Use "crispEdges" to turn off subpixel rendering.
+    pub shape_rendering: Option<&'a str>,
+    pub pixel_hints: Option<SvgRectHints<'a>>,
+}
+
+#[cfg(feature = "svg")]
+#[derive(Copy, Clone, Default)]
+pub struct SvgRectHints<'a> {
+    pub background_color: Option<&'a str>,
+    pub stroke: Option<Stroke<'a>>,
+    pub rx: Option<&'a str>,
+    pub ry: Option<&'a str>,
+}
+
+#[cfg(feature = "svg")]
+#[derive(Copy, Clone, Default)]
+pub struct Stroke<'a> {
+    pub color: Option<&'a str>,
+    pub width: Option<&'a str>,
 }
 
 // MDN SVG: https://developer.mozilla.org/en-US/docs/Web/SVG/Reference/Attribute/viewBox
@@ -67,6 +68,7 @@ pub fn nearest_integer_multiple(old_side_length: usize, new_side_length: usize) 
 pub fn render_svg_with_resampling(
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
+    hints: Option<SvgHints>,
 ) -> Document {
     let side_len = matrix.side_length();
 
@@ -75,17 +77,29 @@ pub fn render_svg_with_resampling(
         None => side_len,
     };
 
+    let hints = hints.unwrap_or_default();
+
+    let bg_color = hints.background_color.unwrap_or("white");
+
     let needs_resample = n != side_len;
-    let bg = Rectangle::new()
+    let mut bg = Rectangle::new()
         .set("x", 0)
         .set("y", 0)
         .set("width", n)
         .set("height", n)
-        .set("fill", "white");
+        .set("fill", bg_color);
+
+    if let Some(shape_rendering) = hints.shape_rendering {
+        bg = bg.set("shape-rendering", shape_rendering);
+    }
 
     // viewBox: (min-x, min-y, width, height)
     // SVG uses a builder.
     let mut doc = Document::new().set("viewBox", (0, 0, n, n)).add(bg);
+
+    // unpack the rect hints.
+    let pixel_hints = hints.pixel_hints.unwrap_or_default();
+    let p_bg_col = pixel_hints.background_color.unwrap_or("black");
 
     // i == y
     for i in 0..n {
@@ -101,13 +115,33 @@ pub fn render_svg_with_resampling(
             };
 
             if 0 == val {
-                let rect = Rectangle::new()
+                let mut rect = Rectangle::new()
                     .set("x", j)
                     .set("y", i)
                     .set("width", 1)
                     .set("height", 1)
-                    .set("fill", "black")
-                    .set("stroke", 1.0);
+                    .set("fill", p_bg_col);
+
+                // Handle additional optional features:
+                if let Some(rx) = pixel_hints.rx {
+                    rect = rect.set("rx", rx);
+                }
+                if let Some(ry) = pixel_hints.ry {
+                    rect = rect.set("ry", ry);
+                }
+
+                if let Some(shape_rendering) = hints.shape_rendering {
+                    rect = rect.set("shape-rendering", shape_rendering);
+                }
+
+                if let Some(stroke_hints) = pixel_hints.stroke {
+                    if let Some(width) = stroke_hints.width {
+                        rect = rect.set("stroke-width", width);
+                    }
+                    if let Some(color) = stroke_hints.color {
+                        rect = rect.set("stroke", color);
+                    }
+                }
 
                 doc = doc.add(rect);
             }
@@ -122,46 +156,84 @@ pub fn render_svg_with_resampling(
 pub fn render_svg_without_resampling(
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
+    hints: Option<SvgHints>,
 ) -> Document {
     const BLOCK_SIZE: usize = 1;
-    let side_len = matrix.side_length();
+    let old_side_length = matrix.side_length();
 
     let n = match side_length {
-        Some(length) => length,
-        None => side_len,
+        Some(new_len) => new_len,
+        None => old_side_length,
     };
 
-    let needs_resample = n != side_len;
+    let hints = hints.unwrap_or_default();
+
+    let bg_color = hints.background_color.unwrap_or("white");
+
+    let needs_resample = n != old_side_length;
 
     let block_size = if needs_resample {
-        n as f32 / side_len as f32
+        n as f32 / old_side_length as f32
     } else {
         1.0
     };
 
-    let bg = Rectangle::new()
+    let mut bg = Rectangle::new()
         .set("x", 0)
         .set("y", 0)
         .set("width", n)
         .set("height", n)
-        .set("fill", "white");
+        .set("fill", bg_color);
+
+    if let Some(shape_rendering) = hints.shape_rendering {
+        bg = bg.set("shape-rendering", shape_rendering);
+    }
+
+    // unpack the rect hints.
+    let pixel_hints = hints.pixel_hints.unwrap_or_default();
+    let p_bg_col = pixel_hints.background_color.unwrap_or("black");
+
     // viewBox: (min-x, min-y, width, height)
     // SVG uses a builder.
     let mut doc = Document::new().set("viewBox", (0, 0, n, n)).add(bg);
     // i == y
-    for i in 0..side_len {
+    for i in 0..old_side_length {
         // j == x
-        for j in 0..side_len {
+        for j in 0..old_side_length {
             let val = *matrix.get(i, j);
             if 0 == val {
                 // Just cast everything to f32
-                let rect = Rectangle::new()
+                let mut rect = Rectangle::new()
                     .set("x", j as f32 * block_size)
                     .set("y", i as f32 * block_size)
                     .set("width", block_size)
                     .set("height", block_size)
-                    .set("fill", "black")
-                    .set("stroke", 1.0);
+                    .set("fill", p_bg_col);
+
+                // Handle additional optional features:
+                //
+                // Corner Radius (x)
+                if let Some(rx) = pixel_hints.rx {
+                    rect = rect.set("rx", rx);
+                }
+                // Corner Radius (y)
+                if let Some(ry) = pixel_hints.ry {
+                    rect = rect.set("ry", ry);
+                }
+
+                // Shape Rendering
+                if let Some(shape_rendering) = hints.shape_rendering {
+                    rect = rect.set("shape-rendering", shape_rendering);
+                }
+
+                if let Some(stroke_hints) = pixel_hints.stroke {
+                    if let Some(width) = stroke_hints.width {
+                        rect = rect.set("stroke-width", width);
+                    }
+                    if let Some(color) = stroke_hints.color {
+                        rect = rect.set("stroke", color);
+                    }
+                }
 
                 doc = doc.add(rect);
             }
@@ -180,9 +252,9 @@ pub fn save_svg(
     file_path: &Path,
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
+    hints: Option<SvgHints>,
 ) -> Result<(), String> {
-    // This function seems to be more correct.
-    let svg = render_svg_without_resampling(matrix, side_length);
+    let svg = render_svg_without_resampling(matrix, side_length, hints);
     write_svg(file_path, &svg)
 }
 
@@ -193,20 +265,81 @@ pub(crate) fn write_svg(file_path: &Path, svg: &Document) -> Result<(), String> 
     res.map_err(|e| format!("ERROR: {}\nKIND: {}", e.to_string(), e.kind()))
 }
 
+// --------- IMAGES -------
+
+#[inline]
+#[cfg(feature = "image")]
+pub fn render_image(matrix: &SquareMatrix<u8>) -> DynamicImage {
+    let n = matrix.side_length();
+    let mut img = GrayImage::new(n as u32, n as u32);
+    // The buffer has to be written, since this the assumption is 8bits per pixel.
+    // It thus has an r, g, and b channel.
+    for i in 0..n {
+        for j in 0..n {
+            let val = *matrix.get(i, j);
+            // Multiply it by 255, black will cancel this out.
+            let color = val * 0xFF;
+            *img.get_pixel_mut(j as u32, i as u32) = Luma([color]);
+        }
+    }
+
+    DynamicImage::ImageLuma8(img)
+}
+
+// TODO: docstring
+// This takes a best-effort approach to find the nearest integer k to multiply/divide the old
+// side_length by to reach the supplied side_length if it is Some.
+// Then it performs a nearest-neighbor resampling before returning a dynamic image for further
+// processing.
+#[cfg(feature = "image")]
+pub fn resize_and_render_image(
+    matrix: &SquareMatrix<u8>,
+    side_length: Option<usize>,
+) -> DynamicImage {
+    let old_side_length = matrix.side_length();
+    let n = side_length
+        .and_then(|new_len| {
+            let mul = nearest_integer_multiple(old_side_length, new_len);
+
+            let new_len = match mul {
+                IntegerInverse::Divide(n) => old_side_length / n,
+                IntegerInverse::Multiply(n) => old_side_length * n,
+            };
+            Some(new_len)
+        })
+        .unwrap_or(old_side_length);
+
+    // Destructuring the SquareMatrix consumes it, so this has to clone
+    // the borrow.
+
+    // If the size is not the same size as the old side_len, the matrix has to be resized
+    let export_image = if n != old_side_length {
+        matrix.resize(n)
+    } else {
+        matrix.clone()
+    };
+
+    let mut img = GrayImage::new(n as u32, n as u32);
+
+    // The buffer has to be written, since this the assumption is 8bits per pixel.
+    // It thus has an r, g, and b channel.
+    for i in 0..n {
+        for j in 0..n {
+            let val = *export_image.get(i, j);
+            // Multiply it by 255, black will cancel this out.
+            let color = val * 0xFF;
+            *img.get_pixel_mut(j as u32, i as u32) = Luma([color]);
+        }
+    }
+
+    DynamicImage::ImageLuma8(img)
+}
+
 // TODO: refactor this interface:
-//  ->  one function that doesn't take side-length -> DynamicImage can
-//      be resized on its own using image crate filters.
 //  ->  one function that takes in an optional side length for export
 //      (this one should use the nearest integer for scaling)
 //      -> The nearest neighbor implementation should be identical to the image crate
 //         so it doesn't really matter which gets used.
-//
-//   -> one function "render img size exact" or something similar used for fractional scaling
-//      -> Again, really doesn't matter which NN gets used.
-//
-//
-//
-//
 //
 // TODO: better docstring.
 // If fractional scaling is desired/necessary, as well as a DynamicImage,
@@ -225,19 +358,22 @@ pub(crate) fn write_svg(file_path: &Path, svg: &Document) -> Result<(), String> 
 // Again, as mentioned above, it is ill advised to resize below the minimum size required
 // for the given QR version.
 #[cfg(feature = "image")]
-pub fn render_image(matrix: &SquareMatrix<u8>, side_length: Option<usize>) -> (DynamicImage, bool) {
-    let side_len = matrix.side_length();
+pub fn resize_and_render_image_exact(
+    matrix: &SquareMatrix<u8>,
+    side_length: Option<usize>,
+) -> (DynamicImage, bool) {
+    let old_side_length = matrix.side_length();
     let n = match side_length {
-        Some(length) => length,
-        None => side_len,
+        Some(new_len) => new_len,
+        None => old_side_length,
     };
 
     // Destructuring the SquareMatrix consumes it, so this has to clone
     // the borrow.
 
     // If the size is not the same size as the old side_len, the matrix has to be resized
-    let export_image = if n != side_len {
-        resize(matrix, n)
+    let export_image = if n != old_side_length {
+        matrix.resize(n)
     } else {
         matrix.clone()
     };
@@ -255,18 +391,11 @@ pub fn render_image(matrix: &SquareMatrix<u8>, side_length: Option<usize>) -> (D
         }
     }
 
-    let is_fract = if n > side_len {
-        n.rem_euclid(side_len) > 0
+    let is_fract = if n > old_side_length {
+        n.rem_euclid(old_side_length) > 0
     } else {
-        side_len.rem_euclid(n) > 0
+        old_side_length.rem_euclid(n) > 0
     };
-
-    #[cfg(debug_assertions)]
-    {
-        if is_fract {
-            eprintln!("Likely fractional: n: {n}, old_len: {side_len}");
-        }
-    }
 
     (DynamicImage::ImageLuma8(img), is_fract)
 }
@@ -278,45 +407,20 @@ pub fn render_image(matrix: &SquareMatrix<u8>, side_length: Option<usize>) -> (D
 // For now, this will only expose png.
 // Users who wish to export in another format can use render_image() and work with
 // the returned DynamicImage (Luma 8).
+#[inline]
 #[cfg(feature = "image")]
 pub fn save_png(
     file_path: &Path,
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
 ) -> Result<(), String> {
-    let (png, _likely_fract) = render_image(matrix, side_length);
-    let format = ImageFormat::Png;
-
-    png.save_with_format(file_path, format)
-        // TODO: better error handling
-        .map_err(|e| format!("ERROR: {}\nKIND: {}", e.to_string(), &e))
+    let png = resize_and_render_image(matrix, side_length);
+    write_png(file_path, &png)
 }
 
-// TODO: this should -probably- not use the sample_matrix method.
-// This will take the provided side length and round it toward to the nearest integer multiple.
+#[inline]
 #[cfg(feature = "image")]
-pub fn save_png_integer_scaling(
-    file_path: &Path,
-    matrix: &SquareMatrix<u8>,
-    side_length: Option<usize>,
-) -> Result<(), String> {
-    let old_side_length = matrix.side_length();
-    let modified_len = side_length.and_then(|length| {
-        let mul = nearest_integer_multiple(old_side_length, length);
-        let new_len = if mul > 0 {
-            old_side_length * mul as usize
-        } else {
-            old_side_length / (mul.abs() as usize)
-        };
-        Some(new_len)
-    });
-
-    let (png, likely_fract) = render_image(matrix, modified_len);
-    // TODO: results.
-    assert!(
-        !likely_fract,
-        "The integer scaling should not cause fractional scaling."
-    );
+pub(crate) fn write_png(file_path: &Path, png: &DynamicImage) -> Result<(), String> {
     let format = ImageFormat::Png;
 
     png.save_with_format(file_path, format)
