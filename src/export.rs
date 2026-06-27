@@ -5,7 +5,7 @@ use svg::Document;
 #[cfg(feature = "svg")]
 use svg::node::element::Rectangle;
 
-#[cfg(feature = "image")]
+#[cfg(any(feature = "image", feature = "png"))]
 use image::{DynamicImage, GrayImage, ImageFormat, Luma};
 
 pub enum IntegerInverse {
@@ -400,15 +400,10 @@ pub fn resize_and_render_image_exact(
     (DynamicImage::ImageLuma8(img), is_fract)
 }
 
-// This api will require the resampling algorithm to resample pixels up to a larger size.
-// Png/Tiff/Bmp are likely the best candidates for this kind of export, since QR works best with pixel
-// precision and zero anti-aliasing.
-//
-// For now, this will only expose png.
-// Users who wish to export in another format can use render_image() and work with
-// the returned DynamicImage (Luma 8).
+// TODO: document -> if users wish to use a different type of format, they can operate on the
+// DynamicImage returned from the above rendering functions.
 #[inline]
-#[cfg(feature = "image")]
+#[cfg(feature = "png")]
 pub fn save_png(
     file_path: &Path,
     matrix: &SquareMatrix<u8>,
@@ -419,7 +414,7 @@ pub fn save_png(
 }
 
 #[inline]
-#[cfg(feature = "image")]
+#[cfg(feature = "png")]
 pub(crate) fn write_png(file_path: &Path, png: &DynamicImage) -> Result<(), String> {
     let format = ImageFormat::Png;
 

@@ -3,7 +3,7 @@
 #![recursion_limit = "512"]
 mod ecc;
 mod encoding;
-#[cfg(any(feature = "image", feature = "svg"))]
+#[cfg(any(feature = "png", feature = "image", feature = "svg"))]
 mod export;
 mod galois;
 mod mask;
@@ -47,11 +47,11 @@ mod tests {
     use crate::tables::*;
     use crate::versioning::get_min_required_version;
 
-    #[cfg(any(feature = "image", feature = "svg"))]
+    #[cfg(any(feature = "png", feature = "svg"))]
     use crate::export::{IntegerInverse, nearest_integer_multiple};
-    #[cfg(feature = "image")]
+    #[cfg(feature = "png")]
     use crate::export::{resize_and_render_image_exact, save_png, write_png};
-    #[cfg(any(feature = "image", feature = "svg"))]
+    #[cfg(any(feature = "png", feature = "svg"))]
     use std::path::{Path, PathBuf};
     // save_svg currently calls the render_svg_without_resampling internally
     // Expect this to be changed--render_svg_with_resampling may be removed if
@@ -75,7 +75,7 @@ mod tests {
     use rxing::{BarcodeFormat, EncodeHintValue, EncodeHints, Writer};
 
     // This will only be used if the image/svg crates are pulled in.
-    #[cfg(any(feature = "image", feature = "svg"))]
+    #[cfg(any(feature = "png", feature = "svg"))]
     const IMG_DIRECTORY_SLUG: &str = "test_images";
 
     // TESTS TO STILL BE IMPLEMENTED:
@@ -932,7 +932,7 @@ mod tests {
     // If it completes, consider it "mostly correct."
     // The resampling is difficult to automate; determine pixel discrepancies by examining
     // the output in CARGO_MANIFEST_DIR/test_images/
-    #[cfg(feature = "image")]
+    #[cfg(feature = "png")]
     #[test]
     fn test_qr_render_png_with_resample() {
         // Alphanumeric, version 1, ecc level Q
@@ -1002,7 +1002,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "svg", feature = "image"))]
+    #[cfg(any(feature = "svg", feature = "png"))]
     fn test_nearest_integer() {
         let old_len = 21 as usize;
         let new_len_greater = (21f32 * 10.50).floor() as usize;
