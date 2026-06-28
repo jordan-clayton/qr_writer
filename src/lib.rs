@@ -1,5 +1,6 @@
 mod ecc;
 mod encoding;
+mod errors;
 #[cfg(any(feature = "png", feature = "image", feature = "svg"))]
 mod export;
 mod galois;
