@@ -1,6 +1,9 @@
-// Most of this can probably all be folded into lib.rs.
-#[derive(Clone, Copy, Debug, PartialEq)]
+// TODO: fold this enum into another module -> likely encoding
+
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 pub enum ECCLevel {
+    #[default]
     L,
     M,
     Q,

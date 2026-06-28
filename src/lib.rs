@@ -26,10 +26,11 @@ pub use qr::encode_qr;
 
 // TODO: cleanup -> Format strings should either all have ending punctuation or none.
 //      + additional cleaning to make these tests easier to read.
+//
 #[cfg(test)]
 mod tests {
     use crate::ecc::ECCLevel;
-    use crate::encoding::get_data_encoding_mode;
+    use crate::encoding::{EncodingHints, get_data_encoding_mode};
     use crate::galois::{
         EXP_TABLE, FIELD_SIZE, GaloisPolynomial, IRR_POLY, LOG_TABLE, REM, gf_exp, gf_inverse,
         gf_multiply, gf_poly_add, gf_poly_divide, gf_poly_mul, gf_poly_multiply_by_monomial,
@@ -46,6 +47,7 @@ mod tests {
     use crate::reed_solomon::ReedSolomon;
     use crate::tables::*;
     use crate::versioning::get_min_required_version;
+    use std::num::NonZero;
 
     #[cfg(any(feature = "png", feature = "svg"))]
     use crate::export::{IntegerInverse, nearest_integer_multiple};
@@ -109,8 +111,9 @@ mod tests {
         // Ensure it's version 2
         let version = get_min_required_version(data.len(), mode, ECCLevel::M);
         assert_eq!(version, 2);
-
-        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::M);
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::M);
+        let (res, _, _) = encode_data_to_bytes(data, hints);
         assert_eq!(res, expect);
     }
     #[test]
@@ -130,8 +133,10 @@ mod tests {
         let version = get_min_required_version(data.len(), mode, ECCLevel::Q);
         assert_eq!(version, 1);
 
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
         // This should be a V1-Q code
-        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::Q);
+        let (res, _, _) = encode_data_to_bytes(data, hints);
         assert_eq!(res, expect);
 
         // TEST CASE FOR V7
@@ -143,7 +148,10 @@ mod tests {
 
         assert_eq!(v7_version, 7);
 
-        let (processed, _, _) = encode_data_to_bytes(&v7_test, ECCLevel::Q);
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
+
+        let (processed, _, _) = encode_data_to_bytes(&v7_test, hints);
 
         let expected_v7: [u8; 88] = [
             0x23, 0xCB, 0x0B, 0x78, 0xD1, 0x72, 0xDC, 0x4D, 0x44, 0xB4, 0xA2, 0xDE, 0x4E, 0x74,
@@ -182,8 +190,9 @@ mod tests {
         // Ensure it's version 1.
         let version = get_min_required_version(data.len(), mode, ECCLevel::Q);
         assert_eq!(version, 1);
-
-        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::Q);
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
+        let (res, _, _) = encode_data_to_bytes(data, hints);
         assert_eq!(res, expect);
     }
 
@@ -212,8 +221,10 @@ mod tests {
         let version = get_min_required_version(char_count, mode, ECCLevel::H);
         assert_eq!(version, 1);
 
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::H);
         // EC level H -> 9 codepoints.
-        let (res, _, _) = encode_data_to_bytes(data, ECCLevel::H);
+        let (res, _, _) = encode_data_to_bytes(data, hints);
         assert_eq!(res, expect);
     }
 
@@ -531,7 +542,9 @@ mod tests {
         assert_eq!(version, 1);
 
         // This should be a V1-M code
-        let (data_codewords, _, _) = encode_data_to_bytes(data, ECCLevel::M);
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::M);
+        let (data_codewords, _, _) = encode_data_to_bytes(data, hints);
         assert_eq!(data_codewords, expect_data_codewords);
 
         // Encode the ec bytes.
@@ -680,8 +693,9 @@ mod tests {
     fn test_prepare_qr_codewords() {
         // Alphanumeric, version 1, ecc level Q
         let data = "HELLO WORLD";
-
-        let (processed, _, _) = prepare_qr_codewords(data, ECCLevel::Q);
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
+        let (processed, _, _) = prepare_qr_codewords(data, hints);
 
         let expected: [u8; 26] = [
             0x20, 0x5B, 0x0B, 0x78, 0xD1, 0x72, 0xDC, 0x4D, 0x43, 0x40, 0xEC, 0x11, 0xEC, 0xA8,
@@ -702,8 +716,10 @@ mod tests {
         let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
 
         assert_eq!(v7_version, 7);
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
 
-        let (processed, _, _) = prepare_qr_codewords(&v7_test, ECCLevel::Q);
+        let (processed, _, _) = prepare_qr_codewords(&v7_test, hints);
 
         let expected_v7: [u8; 196] = [
             0x23, 0x8A, 0x3A, 0x9D, 0xCE, 0xE7, 0xCB, 0x6E, 0x45, 0x22, 0x91, 0x48, 0x0B, 0xF9,
@@ -754,13 +770,16 @@ mod tests {
         // HOWEVER, RXING's IMPLEMENTATION -DOES- ADD A 4 MODULE QUIET ZONE AND THIS NEEDS TO BE
         // ACCOUNTED FOR IN THE COMPARISON LOOP.
 
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        let encoded_v1 = encode_qr(data, Some(hints));
         let enc_v1_mat = encoded_v1.matrix();
         // Per the selection algorithm, this is returning mask 0
-        let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
+        let encoded_v7 = encode_qr(&v7_test, Some(hints));
         let enc_v7_mat = encoded_v7.matrix();
 
+        // This is rxing's EncodeHints
         let qr_hints =
             EncodeHints::default().with(EncodeHintValue::ErrorCorrection("Q".to_string()));
         let n_v1 = enc_v1_mat.side_length();
@@ -836,15 +855,18 @@ mod tests {
         // HELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLD
         // -> test this with existing online encoders and compare by inspection until the full
         // implementation is complete and can be automated.
+
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
         let v7_test = data.repeat(11);
         let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
 
         assert_eq!(v7_version, 7);
 
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        let encoded_v1 = encode_qr(data, Some(hints));
         // Per the selection algorithm, this is returning mask 0
-        let encoded_v7 = encode_qr(&v7_test, ECCLevel::Q);
+        let encoded_v7 = encode_qr(&v7_test, Some(hints));
 
         // Grab the side lengths before render (and adding the quiet zone)
         // RXing's encoder appends the quiet zone to the final matrix, so this needs to be
@@ -938,8 +960,10 @@ mod tests {
         // Alphanumeric, version 1, ecc level Q
         let data = "HELLO WORLD";
 
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        let encoded_v1 = encode_qr(data, Some(hints));
 
         let rendered = encoded_v1.render();
 
@@ -1068,8 +1092,10 @@ mod tests {
         // Alphanumeric, version 1, ecc level Q
         let data = "HELLO WORLD";
 
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, ECCLevel::Q);
+        let encoded_v1 = encode_qr(data, Some(hints));
 
         let rendered = encoded_v1.render();
         let side_length = rendered.side_length();
@@ -1118,7 +1144,9 @@ mod tests {
     #[test]
     fn test_qr_render_svg_with_hints() {
         let data = "HELLO WORLD";
-        let encoded = encode_qr(data, ECCLevel::Q);
+        let mut hints = EncodingHints::default();
+        hints.ecc_level = Some(ECCLevel::Q);
+        let encoded = encode_qr(data, Some(hints));
 
         let render = encoded.render();
 
@@ -1376,11 +1404,72 @@ mod tests {
         run_render_test_ecc_l_with_encode_hints(&test_string, &encode_hints);
     }
 
+    #[test]
+    fn test_encoding_hints() {
+        let hints = EncodingHints {
+            mask: Some(1),
+            version: Some(NonZero::new(40).unwrap()),
+            ecc_level: Some(ECCLevel::Q),
+        };
+
+        let data = "HELLO WORLD";
+
+        let encoded = encode_qr(&data, Some(hints));
+        let side_length = encoded.side_length();
+        let rendered = encoded.render();
+
+        let rxing_hints = EncodeHints::default()
+            .with(EncodeHintValue::ErrorCorrection("Q".to_string()))
+            .with(EncodeHintValue::QrMaskPattern("1".to_string()))
+            .with(EncodeHintValue::QrVersion("40".to_string()));
+        let rxing_format = BarcodeFormat::QR_CODE;
+        let rxing_encoder = QRCodeWriter::default();
+        let qr_encoder = QRCodeWriter::default();
+
+        let expect = qr_encoder
+            .encode_with_hints(
+                &data,
+                &rxing_format,
+                side_length as i32,
+                side_length as i32,
+                &rxing_hints,
+            )
+            .expect("RXING Matrix should encode without issue.");
+
+        let test_side_len = rendered.side_length() as u32;
+
+        assert_eq!(
+            test_side_len,
+            expect.width(),
+            "QR with explicit hints width discrepancy with rxing"
+        );
+        assert_eq!(
+            test_side_len,
+            expect.height(),
+            "QR with explicit hints height discrepancy with rxing"
+        );
+
+        // Byte check
+        for i in 0..test_side_len as usize {
+            for j in 0..test_side_len as usize {
+                let lhs = *rendered.get(i, j);
+                assert!((0u8..=1).contains(&lhs));
+                let (x, y) = (j as u32, i as u32);
+                // RXING stores the complement until image export
+                let rhs = !expect.get(x, y) as u8;
+                assert_eq!(
+                    lhs, rhs,
+                    "v40 (hints test) Bit discrepancy at i: {i}, j:{j}, x: {x}, y: {y}"
+                );
+            }
+        }
+    }
+
     // TODO: mild refactor -> also allow provided ECC level (my enum).
     // The ecc levels should match before sending the hints to rxing.
     // This function should be modified once hints have been implemented in -this- api.
     fn run_render_test_ecc_l_with_encode_hints(test_string: &str, encode_hints: &EncodeHints) {
-        let test_qr = encode_qr(test_string, ECCLevel::L);
+        let test_qr = encode_qr(test_string, None);
         let test_n = test_qr.matrix().side_length();
         let test_render = test_qr.render();
 
@@ -1416,7 +1505,7 @@ mod tests {
     }
 
     fn run_render_test_ecc_l(test_string: &str) {
-        let test_qr = encode_qr(test_string, ECCLevel::L);
+        let test_qr = encode_qr(test_string, None);
         let test_n = test_qr.matrix().side_length();
         let test_render = test_qr.render();
 

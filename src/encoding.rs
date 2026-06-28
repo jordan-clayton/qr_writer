@@ -2,24 +2,38 @@ use crate::tables::*;
 #[cfg(feature = "kanji")]
 use encoding_rs::*;
 use regex::Regex;
-use std::cell::OnceCell;
+use std::num::NonZero;
+use std::sync::OnceLock;
 
-// This could be an enumeration.
-// Not sure yet; decide later.
+// TODO: remove this once ecc moved here.
+use crate::ecc::ECCLevel;
+
+#[derive(Default, Copy, Clone, Debug)]
+pub struct EncodingHints {
+    // version is 1-counted for -most- of everyting in this library
+    // The index conversion (0-indexing) is handled internally.
+    pub version: Option<NonZero<u8>>,
+    pub mask: Option<u8>,
+    pub ecc_level: Option<ECCLevel>,
+}
+
+// TODO: bring versioning over here to reduce modules.
+// TODO: bring ecc over here to reduce modules.
+
+// TODO: refactor this into an enumeration
 pub const ENC_NUMERIC: u8 = 1;
 pub const ENC_ALPHA: u8 = 2;
 pub const ENC_BYTES: u8 = 4;
 pub const ENC_KANJI: u8 = 8;
 
-const NUMERIC: OnceCell<Regex> = OnceCell::new();
-const ALPHANUMERIC: OnceCell<Regex> = OnceCell::new();
-const LATIN1: OnceCell<Regex> = OnceCell::new();
+// TODO: look at making these static and guard with a OnceLock in case of
+// multithreading.
+static NUMERIC: OnceLock<Regex> = OnceLock::new();
+static ALPHANUMERIC: OnceLock<Regex> = OnceLock::new();
+static LATIN1: OnceLock<Regex> = OnceLock::new();
 #[cfg(feature = "kanji")]
-const KANJI: OnceCell<Regex> = OnceCell::new();
+static KANJI: OnceLock<Regex> = OnceLock::new();
 
-// TODO: rethink visibility organization; public is fine until finished.
-//
-//
 // https://en.wikipedia.org/wiki/QR_code
 //
 // NOTE: Other encoding modes; implement when/where necessary
@@ -31,7 +45,7 @@ const KANJI: OnceCell<Regex> = OnceCell::new();
 // NOTE: these can be mixed:
 // [ MODE ] [ Bitstream ] -> [MODE] [Bitstream] -> ... -> [0000 (Terminator)]
 // Implement mixing when necessary
-pub fn get_data_encoding_mode(data: &str) -> u8 {
+pub(crate) fn get_data_encoding_mode(data: &str) -> u8 {
     #[cfg(feature = "kanji")]
     {
         if NUMERIC.get_or_init(init_numeric).is_match(data) {
@@ -52,6 +66,7 @@ pub fn get_data_encoding_mode(data: &str) -> u8 {
         } else {
             // ECI: Extended channel iterpretation
             // TODO: Deal with named constants/enums later.
+            // This gets folded into byte mode anyway.
             0b0111
         }
     }
@@ -70,6 +85,7 @@ pub fn get_data_encoding_mode(data: &str) -> u8 {
     }
 }
 
+// TODO: move this to actual errors.
 pub struct InvalidVersionError;
 // NUM BITS IN LENGTH FIELD (character counter)
 // --------------------------------------------------------
@@ -85,13 +101,13 @@ pub struct InvalidVersionError;
 // --------------------------------------------------------
 // ECI gets folded into BYTE/Latin
 
-pub fn get_mode_idx(mode: u8) -> usize {
+// TODO: this could probably be a method on mode if mode becomes an enumeration.
+pub(crate) fn get_mode_idx(mode: u8) -> usize {
     // This is equivalent to floor(log2(mode)) and folds ECI to nearest power of 2 (4)
     (7 - mode.leading_zeros()) as usize
 }
 
-// TODO: tests module for encoding, make this function private until necessary.
-pub fn get_bit_length(mode: u8, version: u8) -> Result<u8, InvalidVersionError> {
+pub(crate) fn get_bit_length(mode: u8, version: u8) -> Result<u8, InvalidVersionError> {
     let ver_idx = match version {
         1..=9 => 0,
         10..=26 => 1,
@@ -145,7 +161,6 @@ fn is_double_byte_kanji(data: &str) -> bool {
     true
 }
 
-// TODO: check regexes
 // NUMERIC: 0-9 digits
 fn init_numeric() -> Regex {
     Regex::new(r"^\d*$").unwrap()

@@ -2,8 +2,7 @@ use crate::ecc::ECCLevel;
 use crate::encoding::get_mode_idx;
 use crate::tables::*;
 
-// TODO TWICE: this file has only one function -> move it to encoding module.
-pub fn get_min_required_version(num_chars: usize, mode: u8, ecc_level: ECCLevel) -> u8 {
+pub(crate) fn get_min_required_version(num_chars: usize, mode: u8, ecc_level: ECCLevel) -> u8 {
     // get_mode_idx might best be served by a table) in tables.rs.
     // TODO: cleanup refactoring.
     let mode_idx = get_mode_idx(mode);
@@ -23,4 +22,23 @@ pub fn get_min_required_version(num_chars: usize, mode: u8, ecc_level: ECCLevel)
         "Invalid number of characters: {num_chars} for mode: {mode} at Ec level: {:?}",
         &ecc_level
     );
+}
+
+// NOTE: version is expected to be >=1 here.
+pub(crate) fn version_can_fit_data(
+    version: usize,
+    num_chars: usize,
+    mode: u8,
+    ecc_level: ECCLevel,
+) -> bool {
+    assert!(
+        version > 0,
+        "Invalid version counting, version is expected to be counted from 1 and not 0."
+    );
+    let mode_idx = get_mode_idx(mode) as usize;
+    let capacity_idx = ecc_level.capacity_idx() as usize;
+    let version_idx = version - 1;
+
+    let table_idx = version_idx * 16 + capacity_idx * 4 + mode_idx;
+    CHAR_CAPACITIES[table_idx] >= num_chars as u16
 }

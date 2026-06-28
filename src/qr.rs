@@ -1,10 +1,12 @@
 use crate::ecc::ECCLevel;
-use crate::encoding::{ENC_ALPHA, ENC_BYTES, ENC_KANJI, ENC_NUMERIC};
-use crate::encoding::{get_bit_length, get_data_encoding_mode};
+use crate::encoding::{
+    ENC_ALPHA, ENC_BYTES, ENC_KANJI, ENC_NUMERIC, EncodingHints, get_bit_length,
+    get_data_encoding_mode,
+};
 use crate::matrix::QRCodeMatrix;
 use crate::reed_solomon::ReedSolomon;
 use crate::tables::*;
-use crate::versioning::get_min_required_version;
+use crate::versioning::{get_min_required_version, version_can_fit_data};
 use bitvec::prelude::*;
 use itertools::Itertools;
 
@@ -46,8 +48,10 @@ pub struct QRError;
 
 // This function should be the only entrypoint of the api.
 // TODO: add mask and version hints.
-pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> QRCodeMatrix {
-    let (interleaved_with_ecc, version, ecc_level) = prepare_qr_codewords(&data, ecc_level);
+pub fn encode_qr(data: &str, hints: Option<EncodingHints>) -> QRCodeMatrix {
+    let hints = hints.unwrap_or_default();
+    let mask_hint = hints.mask;
+    let (interleaved_with_ecc, version, ecc_level) = prepare_qr_codewords(&data, hints);
     // Convert back to a bitfield and add the remainder bits.
     // Remainder bits are by version only -> version counts from one, so it needs to be
     // decremented.
@@ -71,20 +75,16 @@ pub fn encode_qr(data: &str, ecc_level: ECCLevel) -> QRCodeMatrix {
     // The rest of the algorithm is driven by the work in matrix.rs
     // NOTE: this does not render the QR code into a final bitfield.
     // call QRCode::render()
-    QRCodeMatrix::new(&bitfield, version, ecc_level)
+    QRCodeMatrix::new(&bitfield, version, ecc_level, mask_hint)
 }
 
 // TODO: seriously consider a series of structs to carry the data over tuple structs.
 // Returns the interleaved codeword/ecc vector to be massaged back into a bitfield.
 // For now:
 // -> propagate version and ecc_level in a tuple-struct: (codewords, version, ecc_level)
-pub(crate) fn prepare_qr_codewords(data: &str, ecc_level: ECCLevel) -> (Vec<u8>, usize, ECCLevel) {
+pub(crate) fn prepare_qr_codewords(data: &str, hints: EncodingHints) -> (Vec<u8>, usize, ECCLevel) {
     // Encode data codewords
-    let (bytes, version, ecc) = encode_data_to_bytes(data, ecc_level);
-
-    // This is overly cautious, but this is just to catch carelessness.
-    // The ECC level should not be modified/changed in the data encoding process.
-    assert_eq!(ecc, ecc_level);
+    let (bytes, version, ecc_level) = encode_data_to_bytes(data, hints);
 
     // Compute the groups/blocks
     let data_blocks = compute_blocks(bytes.len(), ecc_level, version);
@@ -112,7 +112,7 @@ pub(crate) fn prepare_qr_codewords(data: &str, ecc_level: ECCLevel) -> (Vec<u8>,
     (interleaved, version, ecc_level)
 }
 
-pub(crate) fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> (Vec<u8>, usize, ECCLevel) {
+pub(crate) fn encode_data_to_bytes(data: &str, hints: EncodingHints) -> (Vec<u8>, usize, ECCLevel) {
     #[cfg(feature = "kanji")]
     let mut char_count = data.len();
 
@@ -131,7 +131,18 @@ pub(crate) fn encode_data_to_bytes(data: &str, ecc_level: ECCLevel) -> (Vec<u8>,
         }
     }
 
-    let version = get_min_required_version(char_count, mode, ecc_level);
+    let ecc_level = hints.ecc_level.unwrap_or_default();
+
+    let version = if let Some(ver) = hints.version {
+        if version_can_fit_data(ver.get().into(), char_count, mode, ecc_level) {
+            ver.get()
+        } else {
+            get_min_required_version(char_count, mode, ecc_level)
+        }
+    } else {
+        get_min_required_version(char_count, mode, ecc_level)
+    };
+
     // This is only for encoding the number of characters.
     let bit_length = match get_bit_length(mode, version) {
         Ok(n_bits) => n_bits as usize,

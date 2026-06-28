@@ -324,8 +324,13 @@ pub struct QRCodeMatrix {
 impl QRCodeMatrix {
     // Let the drawing routine happen in the constructor.
     // TODO: add a mask hint + version hints.
-    pub fn new(codewords: &BitVec<u8, Msb0>, version: usize, ecc_level: ECCLevel) -> Self {
-        let matrix = draw_and_pick_best_qr_code(codewords, version, ecc_level);
+    pub fn new(
+        codewords: &BitVec<u8, Msb0>,
+        version: usize,
+        ecc_level: ECCLevel,
+        mask_hint: Option<u8>,
+    ) -> Self {
+        let matrix = draw_and_pick_best_qr_code(codewords, version, ecc_level, mask_hint);
         Self {
             matrix,
             version,
@@ -337,6 +342,9 @@ impl QRCodeMatrix {
     }
     pub fn ecc_level(&self) -> ECCLevel {
         self.ecc_level
+    }
+    pub fn side_length(&self) -> usize {
+        self.matrix.side_length
     }
 
     // This likely has very little practical use.
@@ -376,6 +384,7 @@ pub(crate) fn draw_and_pick_best_qr_code(
     codewords: &BitVec<u8, Msb0>,
     version: usize,
     ecc_level: ECCLevel,
+    mask_hint: Option<u8>,
 ) -> SquareMatrix<Module> {
     let n = (version - 1) * 4 + 21;
     let mut matrix = SquareMatrix::new(n);
@@ -391,7 +400,22 @@ pub(crate) fn draw_and_pick_best_qr_code(
         emplace_version_information(&mut matrix, version);
     }
 
-    // FUTURE TODO: modify this to respect a mask hint
+    // If there's a mask hint and it's valid, emplace the
+    // format and data bits.
+
+    if let Some(mask) = mask_hint {
+        let mask_pattern = mask.try_into();
+
+        if mask_pattern.is_ok() {
+            let pattern = mask_pattern.unwrap();
+            emplace_format_information_area(&mut matrix, ecc_level, pattern);
+
+            emplace_data_bits(&mut matrix, codewords, pattern);
+            return matrix;
+        }
+    }
+
+    // Otherwise, try and pick the best one.
     let mut candidates = Vec::with_capacity(MAX_NUM_MASK_PATTERNS);
     candidates.push(matrix);
     // Make 7 more copies (total 8).
