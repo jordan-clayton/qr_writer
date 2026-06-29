@@ -1,3 +1,4 @@
+use crate::errors::{QrError, Result};
 use crate::matrix::{Module, SquareMatrix};
 use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
@@ -43,8 +44,8 @@ impl MaskPattern {
 }
 
 impl TryFrom<u8> for MaskPattern {
-    type Error = ();
-    fn try_from(n: u8) -> Result<Self, Self::Error> {
+    type Error = QrError;
+    fn try_from(n: u8) -> std::result::Result<Self, Self::Error> {
         match n {
             0 => Ok(Self::Zero),
             1 => Ok(Self::One),
@@ -54,7 +55,7 @@ impl TryFrom<u8> for MaskPattern {
             5 => Ok(Self::Five),
             6 => Ok(Self::Six),
             7 => Ok(Self::Seven),
-            _ => Err(()),
+            _ => Err(QrError::InvalidMask(n as usize)),
         }
     }
 }
@@ -75,8 +76,8 @@ impl From<MaskPattern> for u8 {
 }
 
 impl TryFrom<usize> for MaskPattern {
-    type Error = ();
-    fn try_from(n: usize) -> Result<Self, Self::Error> {
+    type Error = QrError;
+    fn try_from(n: usize) -> std::result::Result<Self, Self::Error> {
         match n {
             0 => Ok(Self::Zero),
             1 => Ok(Self::One),
@@ -86,7 +87,7 @@ impl TryFrom<usize> for MaskPattern {
             5 => Ok(Self::Five),
             6 => Ok(Self::Six),
             7 => Ok(Self::Seven),
-            _ => Err(()),
+            _ => Err(QrError::InvalidMask(n)),
         }
     }
 }
@@ -119,14 +120,14 @@ const PENALTY_RULE_4: usize = 10;
 // ZXing repository that I'll consider them to be "correct."
 //
 // The plan is to allow for a mask hint/override to allow users to override the mask decision.
-pub(crate) fn compute_best_mask(matrices: &[SquareMatrix<Module>]) -> usize {
+pub(crate) fn compute_best_mask(matrices: &[SquareMatrix<Module>]) -> Result<usize> {
     let mut best_score = usize::MAX;
     let mut best_mask = 0;
     for (i, matrix) in matrices.iter().enumerate() {
-        let p1_score = penalty_rule_1(matrix);
-        let p2_score = penalty_rule_2(matrix);
-        let p3_score = penalty_rule_3(matrix);
-        let p4_score = penalty_rule_4(matrix);
+        let p1_score = penalty_rule_1(matrix)?;
+        let p2_score = penalty_rule_2(matrix)?;
+        let p3_score = penalty_rule_3(matrix)?;
+        let p4_score = penalty_rule_4(matrix)?;
 
         let score = p1_score + p2_score + p3_score + p4_score;
         if score < best_score {
@@ -134,28 +135,29 @@ pub(crate) fn compute_best_mask(matrices: &[SquareMatrix<Module>]) -> usize {
             best_mask = i;
         }
     }
-    best_mask
+    Ok(best_mask)
 }
 
 // NOTE: This is -just- for testing to ensure the scores are correct.
 // The above imperative code achieves the same thing with fewer allocations.
 // NOTE TWICE: if these scores don't agree with the expected cases, implement tests on each run.
 // (They should also probably be tested anyway, so look at implementing them).
-pub(crate) fn compute_penalties(matrices: &[SquareMatrix<Module>]) -> Vec<usize> {
+pub(crate) fn compute_penalties(matrices: &[SquareMatrix<Module>]) -> Result<Vec<usize>> {
     let mut scores = vec![0; matrices.len()];
 
     // Compute the penalty scores for each
-    scores.iter_mut().zip(matrices).for_each(|(score, matrix)| {
-        *score = penalty_rule_1(matrix)
-            + penalty_rule_2(matrix)
-            + penalty_rule_3(matrix)
-            + penalty_rule_4(matrix);
-    });
-    scores
+    for (score, matrix) in scores.iter_mut().zip(matrices) {
+        *score = penalty_rule_1(matrix)?
+            + penalty_rule_2(matrix)?
+            + penalty_rule_3(matrix)?
+            + penalty_rule_4(matrix)?;
+    }
+    Ok(scores)
 }
 
-pub(crate) fn penalty_rule_1(matrix: &SquareMatrix<Module>) -> usize {
-    compute_rule_1_run(matrix, RunDirection::Row) + compute_rule_1_run(matrix, RunDirection::Column)
+pub(crate) fn penalty_rule_1(matrix: &SquareMatrix<Module>) -> Result<usize> {
+    Ok(compute_rule_1_run(matrix, RunDirection::Row)?
+        + compute_rule_1_run(matrix, RunDirection::Column)?)
 }
 
 // This could just be a boolean.
@@ -169,7 +171,7 @@ pub(crate) enum RunDirection {
 pub(crate) fn compute_rule_1_run(
     matrix: &SquareMatrix<Module>,
     run_direction: RunDirection,
-) -> usize {
+) -> Result<usize> {
     // 0 = false = white
     // 1 = true = black
     // -1 = sentinel
@@ -186,7 +188,12 @@ pub(crate) fn compute_rule_1_run(
                 RunDirection::Column => (j, i),
             };
 
-            let module_value = matrix.get(i_0, j_0).inner() as i32;
+            let module_value = matrix
+                .get(i_0, j_0)
+                .ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {i_0}, j: {j_0}"),
+                })?
+                .inner() as i32;
 
             if current_color == -1 {
                 current_color = module_value;
@@ -200,8 +207,6 @@ pub(crate) fn compute_rule_1_run(
                 continue;
             }
 
-            // Sanity check => TODO: remove in API cleanup refactor
-            assert_eq!(module_value, current_color);
             num_similar += 1;
 
             if num_similar == 5 {
@@ -217,10 +222,10 @@ pub(crate) fn compute_rule_1_run(
         num_similar = 0;
     }
 
-    penalty_accumulator
+    Ok(penalty_accumulator)
 }
 
-pub(crate) fn penalty_rule_2(matrix: &SquareMatrix<Module>) -> usize {
+pub(crate) fn penalty_rule_2(matrix: &SquareMatrix<Module>) -> Result<usize> {
     // Check each 2 x 2 box of the same colour.
     let n = matrix.side_length() - 1;
     let mut penalty_accumulator = 0;
@@ -228,10 +233,30 @@ pub(crate) fn penalty_rule_2(matrix: &SquareMatrix<Module>) -> usize {
     for i in 0..n {
         for j in 0..n {
             // Check each of the 4 modules.
-            let a = matrix.get(i, j).inner();
-            let b = matrix.get(i, j + 1).inner();
-            let c = matrix.get(i + 1, j).inner();
-            let d = matrix.get(i + 1, j + 1).inner();
+            let a = matrix
+                .get(i, j)
+                .ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {i}, j: {j}"),
+                })?
+                .inner();
+            let b = matrix
+                .get(i, j + 1)
+                .ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {i}, j: {}", j + 1),
+                })?
+                .inner();
+            let c = matrix
+                .get(i + 1, j)
+                .ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {}, j: {j}", i + 1),
+                })?
+                .inner();
+            let d = matrix
+                .get(i + 1, j + 1)
+                .ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {}, j: {}", i + 1, j + 1),
+                })?
+                .inner();
 
             // a == b
             let e1 = !(a ^ b);
@@ -245,7 +270,7 @@ pub(crate) fn penalty_rule_2(matrix: &SquareMatrix<Module>) -> usize {
         }
     }
 
-    penalty_accumulator * PENALTY_RULE_2
+    Ok(penalty_accumulator * PENALTY_RULE_2)
 }
 
 // Run over rows/columns of finder-like patterns (11 bits):
@@ -272,7 +297,7 @@ const PATTERN_END: [bool; NUM_END_BITS] = [false; NUM_END_BITS];
 //  -- I'm genuinely unsure whether the quiet zone needs to be considered as part of the penalty,
 //     But by the looks of the ZXing implementation, the quiet zone doesn't get considered in
 //     the penalty computation.
-pub(crate) fn penalty_rule_3(matrix: &SquareMatrix<Module>) -> usize {
+pub(crate) fn penalty_rule_3(matrix: &SquareMatrix<Module>) -> Result<usize> {
     let mut penalty_accumulator = 0;
     let n = matrix.side_length();
     for i in 0..n {
@@ -281,10 +306,7 @@ pub(crate) fn penalty_rule_3(matrix: &SquareMatrix<Module>) -> usize {
             if j + NUM_FINDER_PATTERN_PALINDROMIC_BITS <= n {
                 // The row accesses can grab slices.
                 // get_row_ranges is non-inclusive in its range
-                let row = matrix.get_row_range(i, j, NUM_FINDER_PATTERN_PALINDROMIC_BITS);
-
-                // Sanity check.
-                assert_eq!(row.len(), PATTERN.len());
+                let row = matrix.get_row_range(i, j, NUM_FINDER_PATTERN_PALINDROMIC_BITS)?;
 
                 // Check P1
                 let pattern_match = row
@@ -304,13 +326,13 @@ pub(crate) fn penalty_rule_3(matrix: &SquareMatrix<Module>) -> usize {
                     //
                     // i is constant for all of these since we're iterating by row.
                     // The LHS is  j - NUM_END_BITS.
-                    let l_match = horizontal_4_false(i, j as i32 - NUM_END_BITS as i32, matrix);
+                    let l_match = horizontal_4_false(i, j as i32 - NUM_END_BITS as i32, matrix)?;
                     // The rhs is j + NUM_FINDER_PATTERN_PALINDROMIC_BITS
                     let r_match = horizontal_4_false(
                         i,
                         j as i32 + NUM_FINDER_PATTERN_PALINDROMIC_BITS as i32,
                         matrix,
-                    );
+                    )?;
 
                     if l_match || r_match {
                         penalty_accumulator += 1;
@@ -320,29 +342,33 @@ pub(crate) fn penalty_rule_3(matrix: &SquareMatrix<Module>) -> usize {
             // Column check
             if i + NUM_FINDER_PATTERN_PALINDROMIC_BITS <= n {
                 // The column accesses will just kinda stink.
-                let pattern_match = (i..i + NUM_FINDER_PATTERN_PALINDROMIC_BITS)
-                    .zip_eq(PATTERN)
-                    .map(|(k, b)| matrix.get(k, j).inner() == b)
-                    .fold_while(
-                        true,
-                        |acc, e| {
-                            if !acc { Done(acc) } else { Continue(e && acc) }
-                        },
-                    )
-                    .into_inner();
+                let mut pattern_match = true;
+
+                for (k, b) in (i..i + NUM_FINDER_PATTERN_PALINDROMIC_BITS).zip_eq(PATTERN) {
+                    pattern_match = matrix
+                        .get(k, j)
+                        .ok_or(QrError::SampleError {
+                            reason: format!("Invalid read at i: {k}, j: {j}."),
+                        })?
+                        .inner()
+                        == b;
+                    if !pattern_match {
+                        break;
+                    }
+                }
 
                 if pattern_match {
                     // Check for 4 falses on the top of the bottom of the pattern.
                     //
                     // j is constant for all of these since we're iterating by column.
                     // The top is i - NUM_END_BITS;
-                    let t_match = vertical_4_false(j, i as i32 - NUM_END_BITS as i32, matrix);
+                    let t_match = vertical_4_false(j, i as i32 - NUM_END_BITS as i32, matrix)?;
                     // The bottom is i + NUM_FINDER_PATTERN_PALINDROMIC_BITS
                     let b_match = vertical_4_false(
                         j,
                         i as i32 + NUM_FINDER_PATTERN_PALINDROMIC_BITS as i32,
                         matrix,
-                    );
+                    )?;
 
                     if t_match || b_match {
                         penalty_accumulator += 1;
@@ -352,25 +378,22 @@ pub(crate) fn penalty_rule_3(matrix: &SquareMatrix<Module>) -> usize {
         }
     }
 
-    penalty_accumulator * PENALTY_RULE_3
+    Ok(penalty_accumulator * PENALTY_RULE_3)
 }
 
 // NOTE: i has to be constant since we're iterating over a row.
-fn horizontal_4_false(i: usize, from: i32, matrix: &SquareMatrix<Module>) -> bool {
+fn horizontal_4_false(i: usize, from: i32, matrix: &SquareMatrix<Module>) -> Result<bool> {
     let n = matrix.side_length();
 
     // If we're out of bounds, return false
     // If from is negative, it will be extremely greater than n, so this will still return false.
     if from < 0 || from as usize + NUM_END_BITS > n {
-        return false;
+        return Ok(false);
     }
 
-    let range = matrix.get_row_range(i, from as usize, NUM_END_BITS);
+    let range = matrix.get_row_range(i, from as usize, NUM_END_BITS)?;
 
-    // Quick sanity check in-case get_row_range has a bug.
-    assert_eq!(range.len(), PATTERN_END.len());
-
-    range
+    Ok(range
         .iter()
         .zip(PATTERN_END)
         .map(|(m, b)| m.inner() == b)
@@ -380,36 +403,41 @@ fn horizontal_4_false(i: usize, from: i32, matrix: &SquareMatrix<Module>) -> boo
                 if !acc { Done(acc) } else { Continue(e && acc) }
             },
         )
-        .into_inner()
+        .into_inner())
 }
 
 // NOTE: j has to be constant, since this iterates over a column.
-fn vertical_4_false(j: usize, from: i32, matrix: &SquareMatrix<Module>) -> bool {
+fn vertical_4_false(j: usize, from: i32, matrix: &SquareMatrix<Module>) -> Result<bool> {
     let n = matrix.side_length();
 
     // If we're out of bounds, return false
     // If from is negative, it will be extremely greater than n, so this will still return false.
     if from < 0 || from as usize + NUM_END_BITS > n {
-        return false;
+        return Ok(false);
     }
 
     let i = from as usize;
     // Iterate over the columns and compare with the pattern.
-    (i..i + NUM_END_BITS)
-        .zip_eq(PATTERN_END)
-        .map(|(k, b)| matrix.get(k, j).inner() == b)
-        .fold_while(
-            true,
-            |acc, e| {
-                if !acc { Done(acc) } else { Continue(e && acc) }
-            },
-        )
-        .into_inner()
+    let mut pattern_match = false;
+    for (k, b) in (i..i + NUM_END_BITS).zip_eq(PATTERN_END) {
+        pattern_match = matrix
+            .get(k, j)
+            .ok_or(QrError::SampleError {
+                reason: format!("Invalid read at i: {k}, j: {j}"),
+            })?
+            .inner()
+            == b;
+        if !pattern_match {
+            break;
+        }
+    }
+
+    Ok(pattern_match)
 }
 
 // Measure the amount of 5% variances from the mean (50%)
 // The total penalty is The number of (variance - 1) * PENALTY_RULE_4
-pub(crate) fn penalty_rule_4(matrix: &SquareMatrix<Module>) -> usize {
+pub(crate) fn penalty_rule_4(matrix: &SquareMatrix<Module>) -> Result<usize> {
     const DARK_PROPORTION: f32 = 0.5;
     const VARIANCE: f32 = 0.05;
     let mut num_dark = 0;
@@ -418,7 +446,13 @@ pub(crate) fn penalty_rule_4(matrix: &SquareMatrix<Module>) -> usize {
     for i in 0..n {
         for j in 0..n {
             // If we get a black module, increment the accumulator.
-            if matrix.get(i, j).inner() {
+            if matrix
+                .get(i, j)
+                .ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {i}, j: {j}"),
+                })?
+                .inner()
+            {
                 num_dark += 1;
             }
         }
@@ -431,5 +465,5 @@ pub(crate) fn penalty_rule_4(matrix: &SquareMatrix<Module>) -> usize {
     // p = k * 0.05 +- 0.50. Num penalties = floor(k)
     let num_penalties = ((p_dark - DARK_PROPORTION).abs() / VARIANCE).floor() as usize;
 
-    num_penalties * PENALTY_RULE_4
+    Ok(num_penalties * PENALTY_RULE_4)
 }

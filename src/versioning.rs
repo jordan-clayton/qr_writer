@@ -2,7 +2,13 @@ use crate::ecc::ECCLevel;
 use crate::encoding::get_mode_idx;
 use crate::tables::*;
 
-pub(crate) fn get_min_required_version(num_chars: usize, mode: u8, ecc_level: ECCLevel) -> u8 {
+use crate::errors::{QrError, Result};
+
+pub(crate) fn get_min_required_version(
+    num_chars: usize,
+    mode: u8,
+    ecc_level: ECCLevel,
+) -> Result<u8> {
     // get_mode_idx might best be served by a table) in tables.rs.
     // TODO: cleanup refactoring.
     let mode_idx = get_mode_idx(mode);
@@ -12,16 +18,13 @@ pub(crate) fn get_min_required_version(num_chars: usize, mode: u8, ecc_level: EC
         let idx = version * 16 + capacity_idx * 4 + mode_idx;
         // TODO: determine how best to deal with this.
         if CHAR_CAPACITIES[idx] >= (num_chars as u16) {
-            return version as u8 + 1;
+            return Ok(version as u8 + 1);
         }
     }
-
-    // NOTE: this should actually fail if the loop completes without picking a version.
-    // TODO: refactor this into result once errors have been designed.
-    unreachable!(
-        "Invalid number of characters: {num_chars} for mode: {mode} at Ec level: {:?}",
-        &ecc_level
-    );
+    Err(QrError::VersionResolution {
+        data_len: num_chars,
+        ecc_level,
+    })
 }
 
 // NOTE: version is expected to be >=1 here.
@@ -30,15 +33,14 @@ pub(crate) fn version_can_fit_data(
     num_chars: usize,
     mode: u8,
     ecc_level: ECCLevel,
-) -> bool {
-    assert!(
-        version > 0,
-        "Invalid version counting, version is expected to be counted from 1 and not 0."
-    );
+) -> Result<bool> {
+    if version == 0 {
+        return Err(QrError::InvalidVersion);
+    }
     let mode_idx = get_mode_idx(mode) as usize;
     let capacity_idx = ecc_level.capacity_idx() as usize;
     let version_idx = version - 1;
 
     let table_idx = version_idx * 16 + capacity_idx * 4 + mode_idx;
-    CHAR_CAPACITIES[table_idx] >= num_chars as u16
+    Ok(CHAR_CAPACITIES[table_idx] >= num_chars as u16)
 }

@@ -14,7 +14,7 @@ svg = {version = "0.18.0", optional = true}
 [features]
 # TODO: get rid of this after impl written
 # All features should be opt-in.
-default = []
+default = ["all"]
 all = ["kanji", "svg", "png"]
 kanji = ["dep:encoding_rs"]
 image = ["dep:image"]

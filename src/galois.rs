@@ -1,7 +1,5 @@
+use crate::errors::{ArithmeticError, QrError, Result};
 use itertools::Itertools;
-// TODO: Once testing is done, refactor the panicking out of the API.
-//
-//
 // Most of this implementation has been adapted from both, as I have little knowledge in Galois
 // Theory:
 // - ZXing: https://github.com/zxing/zxing/blob/master/core/src/main/java/com/google/zxing/common/reedsolomon/GenericGF.java
@@ -15,6 +13,9 @@ use itertools::Itertools;
 // The irreducible polynomial: 0b100011101, 0x11D, 0d285
 // -> each bit is a power of x => x^8 + x^4 + x^3 + x^2 + 1
 // -> The multiplication tables are reduced modulo the irreducible polynomial
+//
+// Future TODO: generalize this into arbitrary field/polynomials
+// Future TODO: factor into separate crate if implementing a decoder.
 pub(crate) const FIELD_SIZE: usize = 256;
 pub(crate) const IRR_POLY: usize = 0x11D;
 pub(crate) const REM: usize = FIELD_SIZE - 1;
@@ -55,12 +56,6 @@ const fn compute_gf_256_log_tables() -> ([usize; FIELD_SIZE], [usize; FIELD_SIZE
         i += 1;
     }
 
-    // Log[0] is undefined. It's pre-initialized to 0 and should never be touched in the actual
-    // computation.
-    if log[0] != 0 {
-        panic!("INITIALIZATION FAILURE: 0-ASSUMPTION IS INCORRECT.");
-    }
-
     (exp, log)
 }
 
@@ -75,16 +70,15 @@ pub(crate) const LOG_TABLE: [usize; 256] = LOG_TABLES.1;
 // The transparent tuple-struct is just to avoid getting mixed up with Vec<u8>
 #[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
-pub(crate) struct GaloisPolynomial(Vec<u8>);
+pub struct GaloisPolynomial(Vec<u8>);
 
-// TODO: error correction
 impl GaloisPolynomial {
     // Coefficients: a list of u8, where u8 are elements of GF(2^8),
     // Arranged highest order coefficient to lowest order coefficient.
     // i.e. m(x) = a_{n-1} x^{n-1} + a_{n-2} x^{n-2} + ... + a_{1} x + a_{0}
-    pub(crate) fn new(coefficients: &[u8]) -> Self {
+    pub fn new(coefficients: &[u8]) -> Result<Self> {
         if coefficients.is_empty() {
-            panic!("A polynomial has to have at least one coefficient.");
+            return Err(QrError::ArithmeticError(ArithmeticError::EmptyPolynomial));
         }
 
         // Coeffs > 1 + leading zero -> need to shrink the polynomial down
@@ -98,16 +92,15 @@ impl GaloisPolynomial {
             if pruned.is_empty() {
                 pruned.push(0u8);
             }
-            assert!(!pruned.is_empty());
             pruned
         } else {
             coefficients.to_vec()
         };
 
-        Self(coeffs)
+        Ok(Self(coeffs))
     }
 
-    pub(crate) fn monomial(degree: usize, coefficient: usize) -> GaloisPolynomial {
+    pub fn monomial(degree: usize, coefficient: usize) -> GaloisPolynomial {
         if coefficient == 0 {
             gf_poly_zero()
         } else {
@@ -118,52 +111,56 @@ impl GaloisPolynomial {
         }
     }
 
-    pub(crate) fn coefficients(&self) -> &[u8] {
+    pub fn coefficients(&self) -> &[u8] {
         &self.0
     }
 
-    pub(crate) fn degree(&self) -> usize {
+    pub fn degree(&self) -> usize {
         self.0.len() - 1
     }
 
     // This is zero if and only if there is one zero coefficient => the scalar term is 0
-    pub(crate) fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.0[0] == 0
     }
 
-    pub(crate) fn is_zero_deg_monomial(&self) -> bool {
+    pub fn is_zero_deg_monomial(&self) -> bool {
         self.0.len() == 1
     }
 
     // This is O(n) for an n-degree polynomial.
-    pub(crate) fn is_monomial(&self) -> bool {
+    pub fn is_monomial(&self) -> bool {
         self.is_zero_deg_monomial() || { self.0.iter().copied().filter(|&x| x > 0).count() == 1 }
     }
 
     // Gets the value of the coefficient at the nth degree
-    pub(crate) fn nth_coefficient(&self, degree: usize) -> u8 {
+    pub fn nth_coefficient(&self, degree: usize) -> Result<u8> {
         let n = self.0.len();
-        assert!((0..n).contains(&degree));
-        self.0[n - 1 - degree]
+        if !(0..n).contains(&degree) {
+            Err(QrError::ArithmeticError(ArithmeticError::InvalidDegree))
+        } else {
+            Ok(self.0[n - 1 - degree])
+        }
     }
 
-    pub(crate) fn is_larger(&self, other: &GaloisPolynomial) -> bool {
+    pub fn is_larger(&self, other: &GaloisPolynomial) -> bool {
         self.0.len() > other.coefficients().len()
     }
 
     // Evaluates the given polynomial at point a,
     // (i.e.) solves the roots, afaik.
-    pub(crate) fn evaluate_at(&self, a: usize) -> u8 {
+    pub fn evaluate_at(&self, a: usize) -> Result<u8> {
         match a {
             // @ x = 0, is just the lowest order coefficient.
-            0 => self.nth_coefficient(0),
+            // nth_coeffi
+            0 => Ok(self.nth_coefficient(0)?),
             // @ x = 1 is just a sum of the coefficients.
             1 => {
                 let mut res = 0u8;
                 for coefficient in self.0.iter().copied() {
                     res = gf_add(res.into(), coefficient.into()) as u8;
                 }
-                res
+                Ok(res)
             }
             // @ x > 1, substitute x into the polynomial and evaluate.
             // Recall:  x ( a_2 x + a_1) + a_0 => a_2 x^2 + a_1 x + a_0
@@ -174,16 +171,16 @@ impl GaloisPolynomial {
                     res = gf_add(mul, coefficient.into()) as u8
                 }
 
-                res
+                Ok(res)
             }
         }
     }
 }
 
-pub(crate) fn gf_poly_zero() -> GaloisPolynomial {
+pub fn gf_poly_zero() -> GaloisPolynomial {
     GaloisPolynomial(vec![0])
 }
-pub(crate) fn gf_poly_one() -> GaloisPolynomial {
+pub fn gf_poly_one() -> GaloisPolynomial {
     GaloisPolynomial(vec![1])
 }
 
@@ -191,12 +188,12 @@ pub(crate) fn gf_poly_one() -> GaloisPolynomial {
 // This doesn't really need to be a method on GP.
 // It -could- be a std::ops::Add on GaloisPolynomial, but I think letting it remain a function
 // is clearest.
-pub(crate) fn gf_poly_add(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> GaloisPolynomial {
+pub fn gf_poly_add(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> Result<GaloisPolynomial> {
     if p1.is_zero() {
-        return p2.clone();
+        return Ok(p2.clone());
     }
     if p2.is_zero() {
-        return p1.clone();
+        return Ok(p1.clone());
     }
 
     // Find the smaller of the two polynomials
@@ -211,7 +208,6 @@ pub(crate) fn gf_poly_add(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> Galoi
     // The map drives the addition.
     //
     // The index arithmetic -might- be a little off here
-    // TODO: test this and ensure that it doesn't panic and works as expected.
     let summands = larger
         .coefficients()
         .iter()
@@ -222,23 +218,23 @@ pub(crate) fn gf_poly_add(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> Galoi
 
     // The lower coefficients of res (copied from larger) with the sums of the summands.
     res.splice(diff.., summands);
-    GaloisPolynomial::new(&res)
+    Ok(GaloisPolynomial::new(&res)?)
 }
 
 // Polynomial multiplication:
 // (a_1 x + a_0) * (b_1 x + b_0) => a_1 * b_1 x^2 + (a_1 b_0 + b_1 a_0) x + a_0 + b_0
 // [is equivalent to a nested for-loop]
-pub(crate) fn gf_poly_mul(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> GaloisPolynomial {
+pub fn gf_poly_mul(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> Result<GaloisPolynomial> {
     if p1.is_zero() || p2.is_zero() {
-        return gf_poly_zero();
+        return Ok(gf_poly_zero());
     }
 
     // 0-degree Monomial multiplication <=> scalar multiplication
     if p1.is_zero_deg_monomial() {
-        return gf_poly_scale(p2, p1.nth_coefficient(0).into());
+        return Ok(gf_poly_scale(p2, p1.nth_coefficient(0)?.into())?);
     }
     if p2.is_zero_deg_monomial() {
-        return gf_poly_scale(p1, p2.nth_coefficient(0).into());
+        return Ok(gf_poly_scale(p1, p2.nth_coefficient(0)?.into())?);
     }
 
     let mut product = vec![0; p1.coefficients().len() + p2.coefficients().len() - 1];
@@ -250,15 +246,16 @@ pub(crate) fn gf_poly_mul(p1: &GaloisPolynomial, p2: &GaloisPolynomial) -> Galoi
             product[i + j] = gf_add(product[i + j].into(), mul) as u8;
         }
     }
-    GaloisPolynomial::new(&product)
+
+    Ok(GaloisPolynomial::new(&product)?)
 }
 
-pub(crate) fn gf_poly_scale(p: &GaloisPolynomial, scalar: usize) -> GaloisPolynomial {
+pub fn gf_poly_scale(p: &GaloisPolynomial, scalar: usize) -> Result<GaloisPolynomial> {
     match scalar {
         // 0 * p = 0
-        0 => gf_poly_zero(),
+        0 => Ok(gf_poly_zero()),
         // 1 * p = p
-        1 => p.clone(),
+        1 => Ok(p.clone()),
         // k * p = kp
         _ => {
             let new_coeffs = p
@@ -267,18 +264,18 @@ pub(crate) fn gf_poly_scale(p: &GaloisPolynomial, scalar: usize) -> GaloisPolyno
                 .cloned()
                 .map(|a| gf_multiply(a.into(), scalar) as u8)
                 .collect::<Vec<_>>();
-            GaloisPolynomial::new(&new_coeffs)
+            Ok(GaloisPolynomial::new(&new_coeffs)?)
         }
     }
 }
 
-pub(crate) fn gf_poly_multiply_by_monomial(
+pub fn gf_poly_multiply_by_monomial(
     p: &GaloisPolynomial,
     degree: usize,
     coefficient: usize,
-) -> GaloisPolynomial {
+) -> Result<GaloisPolynomial> {
     if coefficient == 0 {
-        return gf_poly_zero();
+        return Ok(gf_poly_zero());
     }
 
     // gf_scale could be used here, but that will result in potentially 2 allocations.
@@ -292,18 +289,20 @@ pub(crate) fn gf_poly_multiply_by_monomial(
         .map(|c| gf_multiply(c.into(), coefficient) as u8);
 
     prod.splice(0..p.coefficients().len(), products);
-    GaloisPolynomial::new(&prod)
+    Ok(GaloisPolynomial::new(&prod)?)
 }
 
 // Polynomial Long Division
 // RE: https://www.thonky.com/qr-code-tutorial/error-correction-coding#step-2-understand-polynomial-long-division
 // Returns (quotient polynomial, remainder)
 // Implementation adapted from: https://github.com/rxing-core/rxing/blob/main/src/common/reedsolomon/generic_gf_poly.rs
-pub(crate) fn gf_poly_divide(
+pub fn gf_poly_divide(
     dividend: &GaloisPolynomial,
     divisor: &GaloisPolynomial,
-) -> (GaloisPolynomial, GaloisPolynomial) {
-    assert!(!divisor.is_zero(), "Cannot divide by zero.");
+) -> Result<(GaloisPolynomial, GaloisPolynomial)> {
+    if divisor.is_zero() {
+        return Err(QrError::ArithmeticError(ArithmeticError::ZeroDivision));
+    }
 
     let mut quotient = gf_poly_zero();
     let mut remainder = dividend.clone();
@@ -320,38 +319,38 @@ pub(crate) fn gf_poly_divide(
     //
     // Stop when remainder is 0, or when the remainder's degree < divisor degree.
 
-    let inverse_leading_term = gf_inverse(divisor.nth_coefficient(divisor.degree()).into());
+    let inverse_leading_term = gf_inverse(divisor.nth_coefficient(divisor.degree())?.into())?;
 
     while remainder.degree() >= divisor.degree() && !remainder.is_zero() {
         let degree_difference = remainder.degree() - divisor.degree();
 
         let scale = gf_multiply(
-            remainder.nth_coefficient(remainder.degree()).into(),
+            remainder.nth_coefficient(remainder.degree())?.into(),
             inverse_leading_term,
         );
 
         // This gets subtracted from the remainder (starting from the divisor)
-        let term = gf_poly_multiply_by_monomial(divisor, degree_difference, scale);
+        let term = gf_poly_multiply_by_monomial(divisor, degree_difference, scale)?;
         // Build the iterative quotient as a series of added monomials.
         let iteration_quotient = GaloisPolynomial::monomial(degree_difference, scale);
         // Update q & r
-        quotient = gf_poly_add(&quotient, &iteration_quotient);
-        remainder = gf_poly_add(&remainder, &term);
+        quotient = gf_poly_add(&quotient, &iteration_quotient)?;
+        remainder = gf_poly_add(&remainder, &term)?;
     }
 
-    (quotient, remainder)
+    Ok((quotient, remainder))
 }
 
 // ----------PRIMITIVE OPERATIONS--------------
 // Returns a + b (mod 2) in GF(2^8)
 #[inline]
-pub(crate) fn gf_add(a: usize, b: usize) -> usize {
+pub fn gf_add(a: usize, b: usize) -> usize {
     a ^ b
 }
 
 // Returns a * b (mod IRR_POLY) in GF(2^8)
 #[inline]
-pub(crate) fn gf_multiply(a: usize, b: usize) -> usize {
+pub fn gf_multiply(a: usize, b: usize) -> usize {
     if a == 0 || b == 0 {
         0
     } else {
@@ -362,26 +361,43 @@ pub(crate) fn gf_multiply(a: usize, b: usize) -> usize {
 
 // returns 2^a (mod IRR_POLY) in GF(2^8)
 #[inline]
-pub(crate) fn gf_exp(a: usize) -> usize {
-    assert!((0..FIELD_SIZE).contains(&a));
-    EXP_TABLE[a]
+pub fn gf_exp(a: usize) -> Result<usize> {
+    if a >= FIELD_SIZE {
+        Err(QrError::ArithmeticError(
+            ArithmeticError::MemberNotInField {
+                member: a,
+                field_size: FIELD_SIZE,
+            },
+        ))
+    } else {
+        Ok(EXP_TABLE[a])
+    }
 }
 
 // Returns log_2(a) (mod IRR_POLY) in GF(2^8)
 #[inline]
-pub(crate) fn gf_log(a: usize) -> usize {
-    assert!(
-        (1..FIELD_SIZE).contains(&a),
-        "OUT OF RANGE OR ZERO ARGUMENT: {a}"
-    );
-    LOG_TABLE[a]
+pub fn gf_log(a: usize) -> Result<usize> {
+    if a == 0 {
+        Err(QrError::ArithmeticError(ArithmeticError::ZeroLog))
+    } else if a >= FIELD_SIZE {
+        Err(QrError::ArithmeticError(
+            ArithmeticError::MemberNotInField {
+                member: a,
+                field_size: FIELD_SIZE,
+            },
+        ))
+    } else {
+        Ok(LOG_TABLE[a])
+    }
 }
 // Returns the multiplicative inverse of a.
 // 2^idx * a = 1 mod IRR_POLY
 #[inline]
-pub(crate) fn gf_inverse(a: usize) -> usize {
-    assert!(a > 0, "Cannot take inverse of 0");
-
-    let idx = FIELD_SIZE - LOG_TABLE[a] - 1;
-    EXP_TABLE[idx]
+pub fn gf_inverse(a: usize) -> Result<usize> {
+    if a == 0 {
+        Err(QrError::ArithmeticError(ArithmeticError::ZeroLog))
+    } else {
+        let idx = FIELD_SIZE - LOG_TABLE[a] - 1;
+        Ok(EXP_TABLE[idx])
+    }
 }

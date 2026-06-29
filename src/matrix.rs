@@ -1,4 +1,5 @@
 use crate::ecc::ECCLevel;
+use crate::errors::{QrError, Result};
 use crate::mask::compute_best_mask;
 use crate::mask::*;
 use crate::tables::*;
@@ -87,26 +88,7 @@ impl Module {
         }
     }
 
-    // TODO: determine whether to leave this.
-    pub(crate) fn complement(&mut self) {
-        match self {
-            Self::Writable(inner) => *inner = !*inner,
-            Self::Data(inner) => *inner = !*inner,
-            Self::Finder(inner) => *inner = !*inner,
-            Self::Timing(inner) => *inner = !*inner,
-            Self::Alignment(inner) => *inner = !*inner,
-            Self::Format(inner) => *inner = !*inner,
-            Self::Version(inner) => *inner = !*inner,
-            Self::Dark => *self = Self::Separator,
-            Self::Separator => *self = Self::Dark,
-        }
-    }
 
-    pub(crate) fn xor(&mut self, mask: bool) {
-        if let Self::Writable(inner) = self {
-            *inner ^= mask;
-        }
-    }
     pub(crate) fn writable(&self) -> bool {
         matches!(self, Self::Writable(_))
     }
@@ -187,28 +169,32 @@ where
     }
     // Returns the actual module cell (which holds state)
     // use .inner() to determine the value (white = false/black = true)
-    pub fn get(&self, i: usize, j: usize) -> &T {
-        &self.data[self.side_length * i + j]
+    pub fn get(&self, i: usize, j: usize) -> Option<&T> {
+        self.data.get(self.side_length * i + j)
     }
-    pub fn get_mut(&mut self, i: usize, j: usize) -> &mut T {
-        &mut self.data[self.side_length * i + j]
+    pub fn get_mut(&mut self, i: usize, j: usize) -> Option<&mut T> {
+        self.data.get_mut(self.side_length * i + j)
     }
 
     // NOTE: this will panic if [i, j] + num_elements goes out of bounds
     // per the logic of a 2D matrix.
     // CLEANUP TODO: refactor into result.
     // NOTE: this is non-inclusive per slice semantics
-    pub fn get_row_range(&self, i: usize, j: usize, num_elements: usize) -> &[T] {
+    pub fn get_row_range(&self, i: usize, j: usize, num_elements: usize) -> Result<&[T]> {
         let n = self.side_length();
-        assert!(
-            j + num_elements - 1 < n,
-            "ROW READ OUT OF RANGE! row_length: {n}, column_idx: {} ",
-            j + num_elements - 1
-        );
 
-        let idx = n * i + j;
+        if j + num_elements > n {
+            Err(QrError::SampleError {
+                reason: format!(
+                    "ROW READ OUT OF RANGE! row_length: {n}, column_idx: {} ",
+                    j + num_elements - 1
+                ),
+            })
+        } else {
+            let idx = n * i + j;
 
-        &self.data[idx..idx + num_elements]
+            Ok(&self.data[idx..idx + num_elements])
+        }
     }
 }
 
@@ -242,21 +228,23 @@ impl SquareMatrix<u8> {
     // TODO: guard against this; abstract over SquareMatrix<u8> and append the QR version.
     // TODO TWICE: refactor this to return a result if the new side length is smaller than the
     // original.
-    pub fn resize(&self, new_side_length: usize) -> SquareMatrix<u8> {
+    pub fn resize(&self, new_side_length: usize) -> Result<SquareMatrix<u8>> {
         let mut out_mat = SquareMatrix::new(new_side_length);
         for i in 0..new_side_length {
             for j in 0..new_side_length {
-                *out_mat.get_mut(i, j) = self.sample_matrix(i, j, new_side_length);
+                *out_mat.get_mut(i, j).ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {i}, j: {j}"),
+                })? = self.sample_matrix(i, j, new_side_length)?;
             }
         }
 
-        out_mat
+        Ok(out_mat)
     }
 
     // This might be handled elsewhere, but can be used for re-interpolating
     // a QR (in texels/modules) into larger squares.
     // This is a basic nearest-neighbor sampling of the matrix
-    pub fn sample_matrix(&self, i: usize, j: usize, img_side_length: usize) -> u8 {
+    pub fn sample_matrix(&self, i: usize, j: usize, img_side_length: usize) -> Result<u8> {
         let n = self.side_length;
 
         let ratio = n as f32 / img_side_length as f32;
@@ -292,8 +280,12 @@ impl SquareMatrix<u8> {
             }
         });
 
-        let (i_a, j_a) = sample_point.expect("Sample point should be assigned.");
-        *self.get(i_a, j_a)
+        let (i_a, j_a) = sample_point.ok_or(QrError::SampleError {
+            reason: "Could not find nearest neigbor to sample.".to_string(),
+        })?;
+        Ok(*self.get(i_a, j_a).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i_a}, j: {j_a}"),
+        })?)
     }
 }
 
@@ -329,13 +321,13 @@ impl QRCodeMatrix {
         version: usize,
         ecc_level: ECCLevel,
         mask_hint: Option<u8>,
-    ) -> Self {
-        let matrix = draw_and_pick_best_qr_code(codewords, version, ecc_level, mask_hint);
-        Self {
+    ) -> Result<Self> {
+        let matrix = draw_and_pick_best_qr_code(codewords, version, ecc_level, mask_hint)?;
+        Ok(Self {
             matrix,
             version,
             ecc_level,
-        }
+        })
     }
     pub fn version(&self) -> usize {
         self.version
@@ -355,7 +347,7 @@ impl QRCodeMatrix {
 
     // TODO: determine whether to resample in the render.
     // Or do it later on export.
-    pub(crate) fn render(&self) -> SquareMatrix<u8> {
+    pub(crate) fn render(&self) -> Result<SquareMatrix<u8>> {
         let old_matrix = self.matrix();
         let old_side_length = old_matrix.side_length();
 
@@ -365,19 +357,28 @@ impl QRCodeMatrix {
         for i in 0..old_side_length {
             for j in 0..old_side_length {
                 // Black = 0, white = 1 -> just write the complement.
-                mat[(i + QUIET_ZONE_SIZE) * new_side_length + (j + QUIET_ZONE_SIZE)] =
-                    !(old_matrix.get(i, j).inner()) as u8;
+                mat[(i + QUIET_ZONE_SIZE) * new_side_length + (j + QUIET_ZONE_SIZE)] = !(old_matrix
+                    .get(i, j)
+                    .ok_or(QrError::RenderError{
+                        reason: format!("Invalid read at i: {i}, j: {j} during matrix render."),
+                    })?
+                    .inner())
+                    as u8;
             }
         }
 
         // This matrix (u8) can be complemented if there's a bug or a desire to take 1-s complement.
-        SquareMatrix {
+        Ok(SquareMatrix {
             data: mat,
             side_length: new_side_length,
-        }
+        })
     }
 }
 
+// NOTE: this no longer falls-back if a MaskHint is provided due to returning a result.
+// Supplying an invalid version mask is considered an error that should not be quietly
+// recovered from.
+//
 // White module = 0 = false
 // Black module = 1 = true
 pub(crate) fn draw_and_pick_best_qr_code(
@@ -385,34 +386,30 @@ pub(crate) fn draw_and_pick_best_qr_code(
     version: usize,
     ecc_level: ECCLevel,
     mask_hint: Option<u8>,
-) -> SquareMatrix<Module> {
+) -> Result<SquareMatrix<Module>> {
     let n = (version - 1) * 4 + 21;
     let mut matrix = SquareMatrix::new(n);
 
-    emplace_timing_patterns(&mut matrix);
+    emplace_timing_patterns(&mut matrix)?;
     // TODO: rename -> just emplace_finder_patterns is fine.
     // No longer need to write it before timing.
-    emplace_finder_patterns_into_blank_matrix(&mut matrix, version);
-    emplace_alignment_squares(&mut matrix, version);
+    emplace_finder_patterns_into_blank_matrix(&mut matrix, version)?;
+    emplace_alignment_squares(&mut matrix, version)?;
 
     // Write version data -> this can be done before embedding the version information.
     if version >= 7 {
-        emplace_version_information(&mut matrix, version);
+        emplace_version_information(&mut matrix, version)?;
     }
 
     // If there's a mask hint and it's valid, emplace the
     // format and data bits.
-
     if let Some(mask) = mask_hint {
-        let mask_pattern = mask.try_into();
+        let mask_pattern = mask.try_into()?;
 
-        if mask_pattern.is_ok() {
-            let pattern = mask_pattern.unwrap();
-            emplace_format_information_area(&mut matrix, ecc_level, pattern);
+        emplace_format_information_area(&mut matrix, ecc_level, mask_pattern)?;
 
-            emplace_data_bits(&mut matrix, codewords, pattern);
-            return matrix;
-        }
+        emplace_data_bits(&mut matrix, codewords, mask_pattern)?;
+        return Ok(matrix);
     }
 
     // Otherwise, try and pick the best one.
@@ -423,28 +420,24 @@ pub(crate) fn draw_and_pick_best_qr_code(
         candidates.push(candidates[0].clone())
     }
 
-    // Sanity check.
-    assert_eq!(candidates.len(), MAX_NUM_MASK_PATTERNS);
-
     for (i, candidate) in candidates.iter_mut().enumerate() {
-        let mask_pattern = i
-            .try_into()
-            .expect("u8 into mask patterns is limited to [0-7] and should cast 1:1");
+        let mask_pattern = i.try_into()?;
         // Write format information
-        emplace_format_information_area(candidate, ecc_level, mask_pattern);
+        emplace_format_information_area(candidate, ecc_level, mask_pattern)?;
 
         // Write the data bits -> this is done by mutation, since it's faster to just
         // preallocate all 8 matrices.
-        emplace_data_bits(candidate, codewords, mask_pattern);
+        emplace_data_bits(candidate, codewords, mask_pattern)?;
     }
 
-    let best_mask = compute_best_mask(&candidates);
+    let best_mask = compute_best_mask(&candidates)?;
 
     // Candidates gets deallocated anyway, but removal avoids implicit clones.
-    candidates.swap_remove(best_mask)
+    Ok(candidates.swap_remove(best_mask))
 }
 
 // This is just for inspection tests
+// Since this is expected to crash, it'll just unwrap on invalid reads.
 #[cfg(debug_assertions)]
 pub(crate) fn print_matrix_and_crash(matrix: &SquareMatrix<Module>) {
     let side_length = matrix.side_length();
@@ -453,7 +446,12 @@ pub(crate) fn print_matrix_and_crash(matrix: &SquareMatrix<Module>) {
     let mut out_string = String::with_capacity(3 * side_length * side_length + side_length);
     for i in 0..side_length {
         for j in 0..side_length {
-            let mat = matrix.get(i, j);
+            let mat = matrix
+                .get(i, j)
+                .ok_or(QrError::SampleError {
+                    reason: format!("Invalid read at i: {i}, j: {j}"),
+                })
+                .unwrap();
 
             match mat.inner() {
                 true => out_string.push('#'),
@@ -476,13 +474,21 @@ pub(crate) fn print_matrix_and_crash(matrix: &SquareMatrix<Module>) {
 // ---- TIMING PATTERNS ---
 
 // Since this -technically- doesn't need to happen before the other elements,
-// this will not hard-assert.
+// this will not hard-assert writable invariants.
 // It's wiser to draw the timing before drawing the finder pattern though.
-pub(crate) fn emplace_timing_patterns(matrix: &mut SquareMatrix<Module>) {
+pub(crate) fn emplace_timing_patterns(matrix: &mut SquareMatrix<Module>) -> Result<()> {
     let side_length = matrix.side_length();
     // Technically this can work on all matrices of side length 6 or greater, but
     // since this is for qr only, go with the minimum side length for a QR code.
-    assert!(side_length >= 21);
+
+    if side_length < 21 {
+        return Err(
+            QrError::WriteError{
+                reason: format!("Invalid side length during timing pattern emplacement. \
+                            Must be greater than 21: {side_length}.")
+            }
+            );
+    }
 
     // Alternate dark-light, always starting dark.
     // i.e. even parity = dark.
@@ -494,7 +500,9 @@ pub(crate) fn emplace_timing_patterns(matrix: &mut SquareMatrix<Module>) {
     const FIXED_IDX: usize = 6;
     for p in 0..side_length {
         // Column write: i = 6
-        let col_module = matrix.get_mut(FIXED_IDX, p);
+        let col_module = matrix.get_mut(FIXED_IDX, p).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {FIXED_IDX}, j: {p} during column timing pattern emplacement."),
+        })?;
 
         // Dark is on even parity
         // dark = true = 1
@@ -505,13 +513,15 @@ pub(crate) fn emplace_timing_patterns(matrix: &mut SquareMatrix<Module>) {
         }
 
         // Row write: j = 6
-        let row_module = matrix.get_mut(p, FIXED_IDX);
+        let row_module = matrix.get_mut(p, FIXED_IDX).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {p}, j: {FIXED_IDX} during row timing pattern emplacement."),
+        })?;
 
         if row_module.writable() || row_module.can_overwrite_with(&next_module) {
             *row_module = next_module;
         }
     }
-
+    Ok(())
     // Vertical (j = 5)
 }
 
@@ -544,34 +554,40 @@ const MAX_SIDE_SEPARATOR_OFFSET: usize = MAX_SIDE_SEPARATOR_BITS - 1;
 pub(crate) fn emplace_finder_patterns_into_blank_matrix(
     matrix: &mut SquareMatrix<Module>,
     version: usize,
-) {
-    // The QR version 1 (the minimum) has side length 21
-    assert!(matrix.side_length() >= 21);
+) -> Result<()> {
 
     let side_length = matrix.side_length();
+    // The QR version 1 (the minimum) has side length 21
+    if side_length < 21 {
+        return Err(
+            QrError::WriteError{reason: format!("Invalid side length during finder pattern emplacement.\
+                Should be >= 21 but was: {side_length}")}
+            );
+    }
+
     // This does a little bit of overdraw (in addition to the timing patterns),
     // to cut down on the drawing complexity.
     // --- BLACK CELLS --- ->
     let inner_black_extent = side_length - MAX_SIDE_BLACK_FINDER_BITS;
 
     // TOP LEFT (0, 0), start at: (0, 0)
-    emplace_black_finder_pattern_into_blank_matrix(0, 0, matrix);
+    emplace_black_finder_pattern_into_blank_matrix(0, 0, matrix)?;
     // BOTTOM LEFT (n-7, 0), start at: (n - 7, 0)
-    emplace_black_finder_pattern_into_blank_matrix(inner_black_extent, 0, matrix);
+    emplace_black_finder_pattern_into_blank_matrix(inner_black_extent, 0, matrix)?;
     // TOP RIGHT (0, n-1), start at: (0, n-7)
-    emplace_black_finder_pattern_into_blank_matrix(0, inner_black_extent, matrix);
+    emplace_black_finder_pattern_into_blank_matrix(0, inner_black_extent, matrix)?;
 
     // --- WHITE CELLS ---
     let inner_white_extent = side_length - MAX_SIDE_WHITE_FINDER_BITS - 1;
 
     // TOP LEFT (0, 0), start at: (1, 1).
-    emplace_white_finder_pattern_into_blank_matrix(1, 1, matrix);
+    emplace_white_finder_pattern_into_blank_matrix(1, 1, matrix)?;
 
     // BOTTOM LEFT (n-1, 0), start at: (n - 1 - 5, 1)
-    emplace_white_finder_pattern_into_blank_matrix(inner_white_extent, 1, matrix);
+    emplace_white_finder_pattern_into_blank_matrix(inner_white_extent, 1, matrix)?;
 
     // TOP RIGHT (0, n-1), start at: (1, n-1 -5)
-    emplace_white_finder_pattern_into_blank_matrix(1, inner_white_extent, matrix);
+    emplace_white_finder_pattern_into_blank_matrix(1, inner_white_extent, matrix)?;
 
     // Write the separators
     // top_left starting indices: (0 + MAX_SIDE_SEPARATOR_OFFSET, 0)
@@ -581,7 +597,7 @@ pub(crate) fn emplace_finder_patterns_into_blank_matrix(
     let bl_start = (side_length - MAX_SIDE_SEPARATOR_BITS, 0);
     let tr_start = (MAX_SIDE_SEPARATOR_OFFSET, side_length - 1);
 
-    emplace_separator_bits(tl_start, bl_start, tr_start, matrix);
+    emplace_separator_bits(tl_start, bl_start, tr_start, matrix)?;
     // Write the dark bit
 
     // The dark bit will be at:
@@ -592,14 +608,23 @@ pub(crate) fn emplace_finder_patterns_into_blank_matrix(
 
     const DARK_J: usize = 8;
     let dark_i = version * 4 + 9;
-    let module = matrix.get_mut(dark_i, DARK_J);
+    let module = matrix.get_mut(dark_i, DARK_J).ok_or(QrError::SampleError {
+        reason: format!("Invalid read at i: {dark_i}, j: {DARK_J} during dark-bit emplacement"),
+    })?;
+
     // Ensure we can write to the cell (i.e, we're not on a finder/separator)
-    assert!(
-        module.can_overwrite_with(&Module::Dark),
-        "POINTER ARITHMETIC OFF WRITING DARK BIT."
-    );
+    if !module.can_overwrite_with(&Module::Dark) {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Cannot write dark bit at i: {dark_i}, j: {DARK_J}.\n\
+        Occupant: {:?}",
+                module
+            ),
+        });
+    }
 
     *module = Module::Dark;
+    Ok(())
 }
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
@@ -641,7 +666,7 @@ pub(crate) fn emplace_white_finder_pattern_into_blank_matrix(
     i0: usize,
     j0: usize,
     matrix: &mut SquareMatrix<Module>,
-) {
+) -> Result<()> {
     // Index pointers
     let mut i = i0;
     let mut j = j0;
@@ -650,7 +675,9 @@ pub(crate) fn emplace_white_finder_pattern_into_blank_matrix(
     let mut written = 0;
 
     while written < TOTAL_WHITE_FINDER_BITS {
-        *matrix.get_mut(i, j) = Module::Finder(false);
+        *matrix.get_mut(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j} during finder pattern (white) emplacement."),
+        })? = Module::Finder(false);
         written += 1;
         let (di, dj) = direction.delta();
         i = ((i as i32) + di) as usize;
@@ -688,12 +715,31 @@ pub(crate) fn emplace_white_finder_pattern_into_blank_matrix(
         }
     }
 
-    // Assert the direction invariant
-    // Since this writes precisely 16 bytes, this should still be "heading up"
-    assert_eq!(direction, Direction::Up);
-    // AND: i and j should both be i0, j0
-    assert_eq!(i, i0);
-    assert_eq!(j, j0);
+    // Assert Invariants: Return Err if the computation is invalid.
+    if direction != Direction::Up {
+        return Err(QrError::WriteError {
+            reason: "Direction Invariant not upheld in finder pattern (white) emplacement.".to_string(),
+        });
+    }
+
+    if i != i0 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Row index pointer invariant not upheld in finder pattern (white) emplacement.\n\
+            i: {i}, i0: {i0}."
+            ),
+        });
+    }
+
+    if j != j0 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Column index pointer invariant not upheld in finder pattern (white) emplacement.\n\
+            j: {j}, j0: {j0}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 // This is used to encode the state of the module cell to make zig-zagging a little bit easier.
@@ -701,10 +747,12 @@ fn emplace_black_finder_pattern_into_blank_matrix(
     i0: usize,
     j0: usize,
     matrix: &mut SquareMatrix<Module>,
-) {
+) -> Result<()> {
     for i in i0..i0 + MAX_SIDE_BLACK_FINDER_BITS {
         for j in j0..j0 + MAX_SIDE_BLACK_FINDER_BITS {
-            let module = matrix.get_mut(i, j);
+            let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+                reason: format!("Invalid read at i: {i}, j: {j} during finder pattern (black) emplacement."),
+            })?;
             let next_module = Module::Finder(true);
             // This will prevent the loop from overwriting the white inner ring if that's
             // accidentally called first.
@@ -714,6 +762,7 @@ fn emplace_black_finder_pattern_into_blank_matrix(
             }
         }
     }
+    Ok(())
 }
 
 /// Args:
@@ -727,7 +776,7 @@ fn emplace_separator_bits(
     bl_tl: (usize, usize),
     tr_br: (usize, usize),
     matrix: &mut SquareMatrix<Module>,
-) {
+) -> Result<()> {
     // TOP LEFT, (top left corner should be (0, 0))
     // Traversal is: (right, up)
     let (mut i0, mut j0) = tl_bl;
@@ -735,24 +784,17 @@ fn emplace_separator_bits(
     let mut j = j0;
 
     while j <= (j0 + MAX_SIDE_SEPARATOR_OFFSET) {
-        let module = matrix.get_mut(i, j);
-        assert!(
-            module.can_overwrite_with(&Module::Separator),
-            "POINTER ARITHMETIC OFF, TOP LEFT SEPARATOR LOOP, j\n\
-            i0: {i0}, j0: {j0}, i: {i}, j: {j}, module: {:?}",
-            std::mem::discriminant(module)
-        );
-        *module = Module::Separator;
+        let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j} during separator bit emplacement."),
+        })?;
 
-        // TODO: delete this once the error is located.
-        // Make sure the module at (i0, 7) is a Separator.
-        assert!(
-            matches!(matrix.get(i0, j), Module::Separator),
-            "Cell did not write in loop: {:?} at i: {}, j: {}",
-            matrix.get(i, j),
-            i,
-            j
-        );
+        if !module.can_overwrite_with(&Module::Separator) {
+            return Err(QrError::WriteError {
+                reason: format!("Cannot replace module: {:?} with separator.", module),
+            });
+        }
+
+        *module = Module::Separator;
 
         j += 1;
     }
@@ -763,13 +805,14 @@ fn emplace_separator_bits(
     // Skip up one cell, (i, j) has already been written in the previous loop.
     i -= 1;
     while i >= (i0 - MAX_SIDE_SEPARATOR_OFFSET) {
-        let module = matrix.get_mut(i, j);
-        assert!(
-            module.can_overwrite_with(&Module::Separator),
-            "POINTER ARITHMETIC OFF, TOP LEFT SEPARATOR LOOP i\n\
-            i0: {i0}, j0: {j0}, i: {i}, j: {j}, module: {:?}",
-            std::mem::discriminant(module)
-        );
+        let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j} during separator bit emplacement."),
+        })?;
+        if !module.can_overwrite_with(&Module::Separator) {
+            return Err(QrError::WriteError {
+                reason: format!("Cannot replace module: {:?} with separator.", module),
+            });
+        }
         *module = Module::Separator;
 
         // Avoid overflow (after last write)
@@ -780,14 +823,22 @@ fn emplace_separator_bits(
     }
 
     // The top right and top left have to end at 0
-    assert_eq!(i, 0, "POINTER ARITHMETIC OFF, TOP LEFT i");
+    if i != 0 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Index pointer invariant not upheld after separator insertion, i: {i}, i0: 0"
+            ),
+        });
+    }
 
-    // j ends at 7 (after 8 bits have been written)
-    assert_eq!(
-        j,
-        MAX_SIDE_SEPARATOR_BITS - 1,
-        "POINTER ARITHMETIC OFF, TOP LEFT j"
-    );
+    if j != MAX_SIDE_SEPARATOR_BITS - 1 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Index pointer invariant not upheld after separator insertion, j: {i}, j0: {}",
+                MAX_SIDE_SEPARATOR_BITS - 1
+            ),
+        });
+    }
 
     // BOTTOM LEFT:
     // Traversal is: (right, down)
@@ -795,13 +846,14 @@ fn emplace_separator_bits(
     i = i0;
     j = j0;
     while j <= (j0 + MAX_SIDE_SEPARATOR_OFFSET) {
-        let module = matrix.get_mut(i, j);
-        assert!(
-            module.can_overwrite_with(&Module::Separator),
-            "POINTER ARITHMETIC OFF, BOTTOM LEFT SEPARATOR LOOP j\n\
-            i0: {i0}, j0: {j0}, i: {i}, j: {j}, module: {:?}",
-            std::mem::discriminant(module)
-        );
+        let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j} during separator emplacement."),
+        })?;
+        if !module.can_overwrite_with(&Module::Separator) {
+            return Err(QrError::WriteError {
+                reason: format!("Cannot replace module: {:?} with separator.", module),
+            });
+        }
         *module = Module::Separator;
         j += 1;
     }
@@ -812,30 +864,37 @@ fn emplace_separator_bits(
     // Skip down one cell.
     i += 1;
     while i <= (i0 + MAX_SIDE_SEPARATOR_OFFSET) {
-        let module = matrix.get_mut(i, j);
-        assert!(
-            module.can_overwrite_with(&Module::Separator),
-            "POINTER ARITHMETIC OFF, BOTTOM LEFT SEPARATOR LOOP i\n\
-            i0: {i0}, j0: {j0}, i: {i}, j: {j}, module: {:?}",
-            std::mem::discriminant(module)
-        );
+        let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j} during separator emplacement."),
+        })?;
+        if !module.can_overwrite_with(&Module::Separator) {
+            return Err(QrError::WriteError {
+                reason: format!("Cannot replace module: {:?} with separator.", module),
+            });
+        }
         *module = Module::Separator;
         i += 1;
     }
 
     // i ends + 1 without correction.
-    assert_eq!(
-        i,
-        i0 + MAX_SIDE_SEPARATOR_BITS,
-        "POINTER ARITHMETIC OFF, BOTTOM LEFT i"
-    );
+    if i != i0 + MAX_SIDE_SEPARATOR_BITS {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Index pointer invariant not upheld after separator insertion, i: {i}, i0: {}",
+                i0 + MAX_SIDE_SEPARATOR_BITS - 1
+            ),
+        });
+    }
 
     // j ends in the proper position because it needs to be corrected.
-    assert_eq!(
-        j,
-        j0 + MAX_SIDE_SEPARATOR_BITS - 1,
-        "POINTER ARITHMETIC OFF, BOTTOM LEFT j"
-    );
+    if j != j0 + MAX_SIDE_SEPARATOR_BITS - 1 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Index pointer invariant not upheld after separator insertion, j: {i}, j0: {}",
+                MAX_SIDE_SEPARATOR_BITS - 1
+            ),
+        });
+    }
 
     // TOP_RIGHT:
     // Traversal is: (left, up)
@@ -844,13 +903,14 @@ fn emplace_separator_bits(
     j = j0;
 
     while j >= j0 - MAX_SIDE_SEPARATOR_OFFSET {
-        let module = matrix.get_mut(i, j);
-        assert!(
-            module.can_overwrite_with(&Module::Separator),
-            "POINTER ARITHMETIC OFF, TOP RIGHT SEPARATOR LOOP j\n\
-            i0: {i0}, j0: {j0}, i: {i}, j: {j}, module: {:?}",
-            std::mem::discriminant(module)
-        );
+        let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j} during separator emplacement."),
+        })?;
+        if !module.can_overwrite_with(&Module::Separator) {
+            return Err(QrError::WriteError {
+                reason: format!("Cannot replace module: {:?} with separator.", module),
+            });
+        }
 
         *module = Module::Separator;
 
@@ -868,13 +928,14 @@ fn emplace_separator_bits(
     // Skip up one cell.
     i -= 1;
     while i >= i0 - MAX_SIDE_SEPARATOR_OFFSET {
-        let module = matrix.get_mut(i, j);
-        assert!(
-            module.can_overwrite_with(&Module::Separator),
-            "POINTER ARITHMETIC OFF, TOP RIGHT SEPARATOR LOOP i\n\
-            i0: {i0}, j0: {j0}, i: {i}, j: {j}, module: {:?}",
-            std::mem::discriminant(module)
-        );
+        let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j} during separator emplacement."),
+        })?;
+        if !module.can_overwrite_with(&Module::Separator) {
+            return Err(QrError::WriteError {
+                reason: format!("Cannot replace module: {:?} with separator.", module),
+            });
+        }
         *module = Module::Separator;
 
         // Avoid overflow after last write
@@ -886,27 +947,46 @@ fn emplace_separator_bits(
     }
 
     // The top right 0 has to be 0
-    assert_eq!(i, 0, "POINTER ARITHMETIC OFF, TOP RIGHT i");
+    if i != 0 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Index pointer invariant not upheld after separator insertion, i: {i}, i0: 0"
+            ),
+        });
+    }
 
     // j should be MAX_SIDE_SEPARATOR_BITS away from its initial position.
-    assert_eq!(
-        j,
-        j0 - (MAX_SIDE_SEPARATOR_BITS - 1),
-        "POINTER ARITHMETIC OFF, TOP RIGHT j"
-    );
+    if j != j0 - (MAX_SIDE_SEPARATOR_BITS - 1) {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Index pointer invariant not upheld after separator insertion, j: {i}, j0: {}",
+                j0 - (MAX_SIDE_SEPARATOR_BITS - 1)
+            ),
+        });
+    }
+    Ok(())
 }
 
 // Lookups: version - 1;
-pub(crate) fn emplace_alignment_squares(matrix: &mut SquareMatrix<Module>, version: usize) {
+pub(crate) fn emplace_alignment_squares(
+    matrix: &mut SquareMatrix<Module>,
+    version: usize,
+) -> Result<()> {
     // Escape early if it's version one, there are no alignment squares to place.
     if version == 1 {
-        return;
+        return Ok(());
     }
 
     // Look up the list of indices.
     let centers = ALIGNMENT_BLOCK_CENTERS[version - 1].inner();
     // Make sure there's at least two centres (i.e. not AlignmentCenters::Zero).
-    assert!(centers.len() >= 2);
+    if centers.len() < 2 {
+        return Err(
+            QrError::WriteError{
+                reason: format!("Invalid number of centers (< 2) for alignment square emplacement. {}", centers.len())
+            }
+            );
+    }
 
     // Produce a list of permutations (with repetitions) of centres.
     // Loop through each centre and test whether there's overlap (corner check).
@@ -917,13 +997,16 @@ pub(crate) fn emplace_alignment_squares(matrix: &mut SquareMatrix<Module>, versi
             let i_center = centers[i];
             let j_center = centers[j];
             let center = (i_center, j_center);
-            let corners = Corners::new(center);
+            let corners = Corners::new(center).map_err(|_| QrError::WriteError{
+                reason: format!("Invalid alignment center at i: {i_center}, j: {j_center}.")
+            })?;
             // TODO: check whether can write, then pass the centre to the writing function.
-            if can_write_alignment_square(&corners, matrix) {
-                write_alignment_square(corners.top_left(), corners.bottom_right(), matrix);
+            if can_write_alignment_square(&corners, matrix)? {
+                write_alignment_square(corners.top_left(), corners.bottom_right(), matrix)?;
             }
         }
     }
+    Ok(())
 }
 
 #[repr(transparent)]
@@ -936,27 +1019,22 @@ pub(crate) struct Corners([(usize, usize); 4]);
 // Rightmost is j + 2;
 impl Corners {
     // Center: (i, j)
-    pub(crate) fn new(center: (usize, usize)) -> Self {
-        assert!(center.0 > 1);
-        assert!(center.1 > 1);
+    pub(crate) fn new(center: (usize, usize)) -> Result<Self> {
+        if center.0 < 2 || center.1 < 2  {
+            return Err(QrError::InvalidCorners
+                );
+        }
         let top_left = (center.0 - 2, center.1 - 2);
         let top_right = (center.0 - 2, center.1 + 2);
         let bottom_left = (center.0 + 2, center.1 - 2);
         let bottom_right = (center.0 + 2, center.1 + 2);
-        Self([top_left, top_right, bottom_left, bottom_right])
+        Ok(Self([top_left, top_right, bottom_left, bottom_right]))
     }
 
     pub(crate) fn top_left(&self) -> (usize, usize) {
         self.0[0]
     }
 
-    pub(crate) fn top_right(&self) -> (usize, usize) {
-        self.0[1]
-    }
-
-    pub(crate) fn bottom_left(&self) -> (usize, usize) {
-        self.0[2]
-    }
 
     pub(crate) fn bottom_right(&self) -> (usize, usize) {
         self.0[3]
@@ -974,36 +1052,50 @@ impl<'a> IntoIterator for &'a Corners {
     }
 }
 
-const ALIGNMENT_CENTRE_OFFSET: usize = 2;
-pub(crate) fn can_write_alignment_square(corners: &Corners, matrix: &SquareMatrix<Module>) -> bool {
+pub(crate) fn can_write_alignment_square(
+    corners: &Corners,
+    matrix: &SquareMatrix<Module>,
+) -> Result<bool> {
     for &(i, j) in corners {
-        let module = matrix.get(i, j);
+        let module = matrix.get(i, j).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i}, j: {j}"),
+        })?;
         // If we can write an alignment square at each of the 4 corners, then we can write an
         // alignmnent square. (it doesn't matter if we're writing true or false)
         if !module.can_overwrite_with(&Module::Alignment(false)) {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 pub(crate) fn write_alignment_square(
     from: (usize, usize),
     to: (usize, usize),
     matrix: &mut SquareMatrix<Module>,
-) {
+) -> Result<()> {
     let mut p = 0;
     for i in from.0..=to.0 {
         for j in from.1..=to.1 {
             let alignment_value = get_alignment_module_value(p);
-            let module = matrix.get_mut(i, j);
+            let module = matrix.get_mut(i, j).ok_or(QrError::SampleError {
+                reason: format!("Invalid read at i: {i}, j: {j}"),
+            })?;
             let next_module = Module::Alignment(alignment_value);
             // The cell -has to be writable-
-            assert!(module.can_overwrite_with(&next_module));
+            if !module.can_overwrite_with(&next_module) {
+                return Err(QrError::WriteError {
+                    reason: format!(
+                        "Could not overwrite module: {:?} during alignment placement at i: {i}, j: {j}",
+                        module
+                    ),
+                });
+            }
             *module = next_module;
             p += 1;
         }
     }
+    Ok(())
 }
 
 // This assumes the accumulator is sent in counting from 0 and that it tracks the "written" cells;
@@ -1036,7 +1128,6 @@ const FORMAT_INFO_COORDINATES: [(usize, usize); 15] = [
     (8, 0), // 0
 ];
 
-const FORMAT_INFO_BITSTRING_LEN: usize = 15;
 // Needs to encircle the top left finder but not overlap the timing
 // Bottom left format: bits are written under the dark bit down to the bottom.
 // (i.e.) column to the right of the bottom left finder, 1 module right of the separator.
@@ -1048,7 +1139,7 @@ pub(crate) fn emplace_format_information_area(
     matrix: &mut SquareMatrix<Module>,
     ecc_level: ECCLevel,
     mask_pattern: MaskPattern,
-) {
+) -> Result<()> {
     let side_length = matrix.side_length();
     // NOTE: FORMAT STRINGS ARE PRECOMPUTED AND CAN BE LOOKED UP.
     // IDX IS ECC_CAPACITY_IDX * 8 + MASK NO;
@@ -1064,16 +1155,33 @@ pub(crate) fn emplace_format_information_area(
 
         // TODO: refactor into result; for now assertions are fine.
         // This should have either the msb at 0 (if 0, i.e. no msb), or 1 if it's 1
-        assert!((0u32..=1).contains(&find_msb(write_value as u32)));
+        if !(0u32..=1).contains(&find_msb(write_value as u32)) {
+            return Err(QrError::WriteError {
+                reason: format!(
+                    "Invalid MSB during format emplacement: {write_value}, should be 0/1."
+                ),
+            });
+        }
+
         let write_bit = write_value & 1 == 1;
         let write_module = Module::Format(write_bit);
 
         // Get the next coordinate.
         let (i_0, j_0) = *coordinate;
-        let lhs_module = matrix.get_mut(i_0, j_0);
+        let lhs_module = matrix.get_mut(i_0, j_0).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i_0}, j: {j_0} in format emplacement."),
+        })?;
         // These bits -have- to be writable, otherwise we're pointing at a function pattern,
         // meaning the version coordinates are wrong.
-        assert!(lhs_module.writable());
+        if !lhs_module.writable() {
+            return Err(QrError::WriteError {
+                reason: format!(
+                    "Cannot overwrite module: {:?} at i: {i_0}, j: {j_0} in format emplacement.",
+                    lhs_module
+                ),
+            });
+        }
+
         *lhs_module = write_module;
 
         // Handle Bottom/RHS:
@@ -1087,15 +1195,22 @@ pub(crate) fn emplace_format_information_area(
             (side_length - 7 + i - 8, i_0)
         };
 
-        let other_module = matrix.get_mut(i_1, j_1);
-        assert!(
-            other_module.writable(),
-            "Format Index arithmetic is probably off.\n i0: {i_0}, j0: {j_0}, i_1: {i_1}, j_1: {j_1}\n\
-            module: {:?}",
-            other_module
-        );
+        let other_module = matrix.get_mut(i_1, j_1).ok_or(QrError::SampleError {
+            reason: format!("Invalid read at i: {i_1}, j: {j_1} during format emplacement."),
+        })?;
+
+        if !other_module.writable() {
+            return Err(QrError::WriteError {
+                reason: format!(
+                    "Cannot overwrite module: {:?} at i: {i_1}, j: {j_1} in format emplacement.",
+                    other_module
+                ),
+            });
+        }
+
         *other_module = write_module;
     }
+    Ok(())
 }
 
 // Do LSB to MSB.
@@ -1126,8 +1241,6 @@ pub(crate) fn emplace_format_information_area(
 // These are directly adjacent to format square + separators, which are 8 bits in length
 // So, the offset is 8 + smallest matrix dimesion (3) = 11
 
-// This constant may go unused because of the loop structure.
-const VERSION_INFO_BITSTRING_LEN: usize = 18;
 const VERSION_MATRIX_OFFSET: usize = 11;
 
 // This is easiest to handle with a double loop.
@@ -1140,13 +1253,15 @@ const VERSION_MATRIX_OFFSET: usize = 11;
 //   }
 // }
 
-pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, version: usize) {
+pub(crate) fn emplace_version_information(
+    matrix: &mut SquareMatrix<Module>,
+    version: usize,
+) -> Result<()> {
     // NOTE: VERSION BITSTRINGS ARE PRECOMPUTED AND CAN BE LOOKED UP.
     // TABLE IDX is version - 7;
-    assert!(
-        version >= 7,
-        "Invalid version passed, must be 7 or greater: {version}"
-    );
+    if version < 7 {
+        return Err(QrError::InvalidVersion);
+    }
 
     // These are tested and should be assumed to be correct.
     let version_string = VERSION_INFO_STRINGS[version - 7];
@@ -1158,34 +1273,54 @@ pub(crate) fn emplace_version_information(matrix: &mut SquareMatrix<Module>, ver
             let bit_mask = 1 << bit_idx;
             let write_value = ((version_string & bit_mask) >> bit_idx) as u8;
             let write_bit = (write_value & 1) == 1;
-            // Sanity check.
-            assert!((0u32..=1).contains(&find_msb(write_value as u32)));
             let write_module = Module::Version(write_bit);
 
             // Insertion pointer.
             let p = side_length - VERSION_MATRIX_OFFSET + j;
 
             // Bottom left side:
-            let bottom_module = matrix.get_mut(p, i);
+            let bottom_module = matrix.get_mut(p, i).ok_or(QrError::SampleError {
+                reason: format!(
+                    "Invalid read at i: {p}, j: {i} during bottom version emplacement."
+                ),
+            })?;
             // Ensure it's writable -> if it's not, we've hit a reserved spot and I've done
             // something wrong.
-            assert!(bottom_module.writable());
+            if !bottom_module.writable() {
+                return Err(QrError::WriteError {
+                    reason: format!(
+                        "Could not overwrite module: {:?} at i: {p}, j: {i} during bottom version emplacement.",
+                        bottom_module
+                    ),
+                });
+            }
+
             *bottom_module = write_module;
 
             // Top Right side:
-            let top_module = matrix.get_mut(i, p);
-            // Again, assert writable.
-            assert!(top_module.writable());
+            let top_module = matrix.get_mut(i, p).ok_or(QrError::SampleError {
+                reason: format!("Invalid read at i: {i}, j: {p} during top version emplacement."),
+            })?;
+            // Again, assert writable invariant and return Err if not correct.
+            if !top_module.writable() {
+                return Err(QrError::WriteError {
+                    reason: format!(
+                        "Could not overwrite module: {:?} at i: {i}, j: {p} during top version emplacement.",
+                        top_module
+                    ),
+                });
+            }
             *top_module = write_module;
         }
     }
+    Ok(())
 }
 
 pub(crate) fn emplace_data_bits(
     matrix: &mut SquareMatrix<Module>,
     codewords: &BitVec<u8, Msb0>,
     mask_pattern: MaskPattern,
-) {
+) -> Result<()> {
     const TIMING_IDX: usize = 6;
     let side_length = matrix.side_length();
     let mut direction = -1;
@@ -1213,7 +1348,13 @@ pub(crate) fn emplace_data_bits(
             // Index the table at (row, j)
             for k in 0..2 {
                 let j = column - k;
-                let module = matrix.get_mut(row as usize, j);
+                let module = matrix
+                    .get_mut(row as usize, j)
+                    .ok_or(QrError::SampleError {
+                        reason: format!(
+                            "Invalid read at i: {row}, j: {j} during data bit emplacement."
+                        ),
+                    })?;
 
                 if !module.writable() {
                     continue;
@@ -1222,11 +1363,15 @@ pub(crate) fn emplace_data_bits(
                 // The remainder bits are
                 // Write to the matrix at (row, j):
                 // Get the bit value.
-                // (TODO: refactor the expect out to a result once code is debugged)
                 let bit_val = *codewords
                     .get(bit_idx)
                     .as_deref()
-                    .expect("The bit_idx should always be in range.");
+                    .ok_or(QrError::WriteError {
+                        reason: format!(
+                            "Failed to get bit: {bit_idx} from bitvec of size: {} during data bit emplacement.",
+                            codewords.len()
+                        ),
+                    })?;
 
                 // Check if we mask.
                 let write_value = if mask_pattern.should_mask(row as usize, j) {
@@ -1253,18 +1398,43 @@ pub(crate) fn emplace_data_bits(
         column = column.saturating_sub(2);
     }
 
-    // Sanity checks (transform this into result):
+    // Assert invariants:
     // Bit_idx => Should end at codewords.len()
     // column => ends at 0
     // row => ends at side_length - 1
     // directions is now going up => is negative.
-    assert_eq!(column, 0, "Column is off: {column}");
-    assert_eq!(row, (side_length - 1) as i32, "Row is off: {row}");
-    assert_eq!(
-        bit_idx,
-        codewords.len(),
-        "bit idx is off. bit_idx: {bit_idx}, num_bits: {}",
-        codewords.len()
-    );
-    assert!(direction.is_negative(), "Direction is off: {direction}");
+    if column != 0 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Column invariant violated. Should end at 0 after data emplacement: {column}."
+            ),
+        });
+    }
+
+    if row != (side_length - 1) as i32 {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Row invariant violated. Should end at {} after data emplacement: {row}.",
+                side_length - 1
+            ),
+        });
+    }
+
+    if bit_idx != codewords.len() {
+        return Err(QrError::WriteError {
+            reason: format!(
+                "Bit idx invariant violated. Should end at {} after data emplacement: {bit_idx}",
+                codewords.len()
+            ),
+        });
+    }
+
+    if direction.is_positive() {
+        return Err(QrError::WriteError{
+            reason: 
+                "Direction invariant violated. Should be negative (up) after data emplacement but was positive (down)".to_string()
+                        
+        });
+    }
+    Ok(())
 }

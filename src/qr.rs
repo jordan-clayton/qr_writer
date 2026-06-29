@@ -3,6 +3,7 @@ use crate::encoding::{
     ENC_ALPHA, ENC_BYTES, ENC_KANJI, ENC_NUMERIC, EncodingHints, get_bit_length,
     get_data_encoding_mode,
 };
+use crate::errors::{QrError, Result, TextEncoding};
 use crate::matrix::QRCodeMatrix;
 use crate::reed_solomon::ReedSolomon;
 use crate::tables::*;
@@ -40,61 +41,59 @@ const KANJI_BIT_LEN: usize = 13;
 
 // TODO: type alias for Version: Nonzero<usize>/usize
 
-// TODO: implement better error handling
-pub struct QRError;
 // TODO: this driver function may best be factored out somewhere else so that it's easier to just
 // look things up.
 // This module file is going to get large.
 
 // This function should be the only entrypoint of the api.
-// TODO: add mask and version hints.
-pub fn encode_qr(data: &str, hints: Option<EncodingHints>) -> QRCodeMatrix {
+pub fn encode_qr(data: &str, hints: Option<EncodingHints>) -> Result<QRCodeMatrix> {
     let hints = hints.unwrap_or_default();
     let mask_hint = hints.mask;
-    let (interleaved_with_ecc, version, ecc_level) = prepare_qr_codewords(&data, hints);
+    let (interleaved_with_ecc, version, ecc_level) = prepare_qr_codewords(&data, hints)?;
     // Convert back to a bitfield and add the remainder bits.
     // Remainder bits are by version only -> version counts from one, so it needs to be
     // decremented.
     let n_remainder_bits = REMAINDER_BITS[version - 1] as usize;
 
-    // TODO: refactor assertions to Result during API cleanup
-    let interleaved_bits = interleaved_with_ecc.len() * BYTE_LENGTH;
     // Cast to a bitfield and add the remainder bits.
     let mut bitfield = BitVec::<u8, Msb0>::from_vec(interleaved_with_ecc);
     bitfield.resize(bitfield.len() + n_remainder_bits, false);
 
-    assert_eq!(bitfield.len(), interleaved_bits + n_remainder_bits);
-    // Assert that the remainder bits are placed at the end--in case I might've slightly
-    // misunderstood the bitvec api.
-    assert!(
-        bitfield[bitfield.len() - n_remainder_bits..]
-            .iter()
-            .all(|b| b == false)
-    );
+    if !(bitfield[bitfield.len() - n_remainder_bits..]
+        .iter()
+        .all(|b| b == false))
+    {
+        return Err(QrError::WriteError {
+            reason: "Failed to place remainder bits properly.".to_string(),
+        });
+    }
 
     // The rest of the algorithm is driven by the work in matrix.rs
     // NOTE: this does not render the QR code into a final bitfield.
-    // call QRCode::render()
-    QRCodeMatrix::new(&bitfield, version, ecc_level, mask_hint)
+    // call QRCode::render() to render the bitfield for export.
+    Ok(QRCodeMatrix::new(&bitfield, version, ecc_level, mask_hint)?)
 }
 
 // TODO: seriously consider a series of structs to carry the data over tuple structs.
 // Returns the interleaved codeword/ecc vector to be massaged back into a bitfield.
 // For now:
 // -> propagate version and ecc_level in a tuple-struct: (codewords, version, ecc_level)
-pub(crate) fn prepare_qr_codewords(data: &str, hints: EncodingHints) -> (Vec<u8>, usize, ECCLevel) {
+pub(crate) fn prepare_qr_codewords(
+    data: &str,
+    hints: EncodingHints,
+) -> Result<(Vec<u8>, usize, ECCLevel)> {
     // Encode data codewords
-    let (bytes, version, ecc_level) = encode_data_to_bytes(data, hints);
+    let (bytes, version, ecc_level) = encode_data_to_bytes(data, hints)?;
 
     // Compute the groups/blocks
-    let data_blocks = compute_blocks(bytes.len(), ecc_level, version);
+    let data_blocks = compute_blocks(bytes.len(), ecc_level, version)?;
     // Look up the number of ecc_codewords per block
 
     let idx = (version - 1) * 4 + ecc_level.capacity_idx();
     let ec_bytes = EC_CODEWORDS_PER_BLOCK[idx] as usize;
 
     // Compute error correction codewords
-    let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&bytes, &data_blocks, ec_bytes);
+    let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&bytes, &data_blocks, ec_bytes)?;
 
     // Max number of data bytes = max(group1 data bytes, group2 data bytes)
     let max_data_bytes_per_block = NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_1[idx]
@@ -109,10 +108,13 @@ pub(crate) fn prepare_qr_codewords(data: &str, hints: EncodingHints) -> (Vec<u8>
         max_data_bytes_per_block,
         ec_bytes,
     );
-    (interleaved, version, ecc_level)
+    Ok((interleaved, version, ecc_level))
 }
 
-pub(crate) fn encode_data_to_bytes(data: &str, hints: EncodingHints) -> (Vec<u8>, usize, ECCLevel) {
+pub(crate) fn encode_data_to_bytes(
+    data: &str,
+    hints: EncodingHints,
+) -> Result<(Vec<u8>, usize, ECCLevel)> {
     #[cfg(feature = "kanji")]
     let mut char_count = data.len();
 
@@ -126,30 +128,34 @@ pub(crate) fn encode_data_to_bytes(data: &str, hints: EncodingHints) -> (Vec<u8>
     #[cfg(feature = "kanji")]
     {
         if mode == ENC_KANJI {
-            assert_eq!(char_count.rem_euclid(3), 0);
+            if char_count.rem_euclid(3) != 0 {
+                return Err(QrError::DataEncodeError {
+                    reason: format!(
+                        "Invalid number of bytes per kanji. Should be a multiple of 3: {char_count}."
+                    ),
+                });
+            }
             char_count /= 3;
         }
     }
 
     let ecc_level = hints.ecc_level.unwrap_or_default();
 
+    // If a valid version is supplied as a hint, try to meet it.
+    // If it cannot fit properly, pick the minimum.
+    // If a minimum version cannot be picked, this will have to return an error.
     let version = if let Some(ver) = hints.version {
-        if version_can_fit_data(ver.get().into(), char_count, mode, ecc_level) {
+        if version_can_fit_data(ver.get().into(), char_count, mode, ecc_level)? {
             ver.get()
         } else {
-            get_min_required_version(char_count, mode, ecc_level)
+            get_min_required_version(char_count, mode, ecc_level)?
         }
     } else {
-        get_min_required_version(char_count, mode, ecc_level)
+        get_min_required_version(char_count, mode, ecc_level)?
     };
 
     // This is only for encoding the number of characters.
-    let bit_length = match get_bit_length(mode, version) {
-        Ok(n_bits) => n_bits as usize,
-        Err(_) => {
-            panic!("Invalid QR Version supplied!")
-        }
-    };
+    let bit_length = get_bit_length(mode, version)? as usize;
 
     let prealloc_size = match mode {
         ENC_NUMERIC => THREE_DIGIT_BITLEN,
@@ -159,7 +165,7 @@ pub(crate) fn encode_data_to_bytes(data: &str, hints: EncodingHints) -> (Vec<u8>
         ENC_KANJI => KANJI_BIT_LEN,
         #[cfg(not(feature = "kanji"))]
         ENC_KANJI => unreachable!("Non feature-supported kanji should be treated as bytes."),
-        _ => panic!("INVALID MODE: {mode}"),
+        _ => return Err(QrError::InvalidMode(mode)),
     };
 
     // Preallocate a bitarray.
@@ -185,22 +191,23 @@ pub(crate) fn encode_data_to_bytes(data: &str, hints: EncodingHints) -> (Vec<u8>
     // idx += bit_length;
     // Finish processing the data.
     let mut end_idx = match mode {
-        ENC_NUMERIC => encode_numeric(data, &mut bits, idx + bit_length),
-        ENC_ALPHA => encode_alpha(data, &mut bits, idx + bit_length),
+        ENC_NUMERIC => encode_numeric(data, &mut bits, idx + bit_length)?,
+        ENC_ALPHA => encode_alpha(data, &mut bits, idx + bit_length)?,
         ENC_BYTES => encode_bytes(data, &mut bits, idx + bit_length),
         #[cfg(feature = "kanji")]
         ENC_KANJI => {
             // The data needs to be re-encoded from unicode over to ShiftJIS
             // The encoding is already checked to be able to actually return ENC_KANJI
             let (cow, _enc, has_errors) = SHIFT_JIS.encode(data);
-            assert!(!has_errors);
-            // Take ownership (copy if needed) of the data and pass the bytes to encode_kanji.
+            if has_errors {
+                return Err(QrError::UtfEncodeError(TextEncoding::ShiftJIS));
+            }
             let data = cow.into_owned();
-            encode_kanji(&data, &mut bits, idx + bit_length)
+            encode_kanji(&data, &mut bits, idx + bit_length)?
         }
         #[cfg(not(feature = "kanji"))]
         ENC_KANJI => unreachable!("Non feature-supported kanji should be treated as bytes."),
-        _ => panic!("INVALID MODE: {mode}"),
+        _ => return Err(QrError::InvalidMode(mode)),
     };
 
     // Get the number of codewords
@@ -237,19 +244,15 @@ pub(crate) fn encode_data_to_bytes(data: &str, hints: EncodingHints) -> (Vec<u8>
 
     // At this point, we can convert into a vector of bytes and return it.
     // Append the version and the ecc level together for unpacking
-    (bits.into_vec(), version as usize, ecc_level)
+    Ok((bits.into_vec(), version as usize, ecc_level))
 }
 
 // TODO: clean up these functions to avoid OOB panics.
 //      - Either resize in-case of pointer arithmetic errors or return a result (or both)
-//
-// TODO: make into result types.
-// TODO: Refactor into result types after debugging. This function should never be called on
-// non-numeric data.
-fn encode_numeric(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
+fn encode_numeric(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> Result<usize> {
     // The iterator will panic on 0-characters.
     if data.is_empty() {
-        return start_idx;
+        return Ok(start_idx);
     }
 
     let mut idx = start_idx;
@@ -257,28 +260,41 @@ fn encode_numeric(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize)
     // Closures for triplet-processing
     let one_digit = |c1: char, bitfield: &mut BitVec<u8, Msb0>, idx: usize| {
         // Assert ascii char
-        assert!(c1.is_ascii_digit());
+        if !c1.is_ascii_digit() {
+            return Err(QrError::DataEncodeError {
+                reason: format!("Invalid ascii digit in numeric encoding: {c1}."),
+            });
+        }
+
         let num = (c1 as u8) - b'0';
         bitfield[idx..idx + ONE_DIGIT_BITLEN].store_be(num);
-        ONE_DIGIT_BITLEN
+        Ok(ONE_DIGIT_BITLEN)
     };
     let two_digit = |c1: char, c2: char, bitfield: &mut BitVec<u8, Msb0>, idx: usize| {
-        assert!(c1.is_ascii_digit() && c2.is_ascii_digit());
+        if !(c1.is_ascii_digit() && c2.is_ascii_digit()) {
+            return Err(QrError::DataEncodeError {
+                reason: format!("Invalid ascii digit in numeric encoding: {c1}, {c2}."),
+            });
+        }
         let num1 = (c1 as u16) - b'0' as u16;
         let num2 = (c2 as u16) - b'0' as u16;
         let num = num1 * 10 + num2;
         bitfield[idx..idx + TWO_DIGIT_BITLEN].store_be(num);
-        TWO_DIGIT_BITLEN
+        Ok(TWO_DIGIT_BITLEN)
     };
     let three_digit =
         |c1: char, c2: char, c3: char, bitfield: &mut BitVec<u8, Msb0>, idx: usize| {
-            assert!(c1.is_ascii_digit() && c2.is_ascii_digit() && c3.is_ascii_digit());
+            if !(c1.is_ascii_digit() && c2.is_ascii_digit() && c3.is_ascii_digit()) {
+                return Err(QrError::DataEncodeError {
+                    reason: format!("Invalid ascii digit in numeric encoding: {c1}, {c2}, {c3}."),
+                });
+            }
             let num1 = (c1 as u16) - b'0' as u16;
             let num2 = (c2 as u16) - b'0' as u16;
             let num3 = (c3 as u16) - b'0' as u16;
             let num = num1 * 100 + num2 * 10 + num3;
             bitfield[idx..idx + THREE_DIGIT_BITLEN].store_be(num);
-            THREE_DIGIT_BITLEN
+            Ok(THREE_DIGIT_BITLEN)
         };
 
     // NOTE: Thonky reference diverges from ZXing/most QR implementations with its leading-zero
@@ -288,21 +304,23 @@ fn encode_numeric(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize)
         let c2 = triplet.next();
         let c3 = triplet.next();
         let inc = match (c1, c2, c3) {
-            (Some(c1), Some(c2), Some(c3)) => three_digit(c1, c2, c3, bitfield, idx),
-            (Some(c1), Some(c2), None) => two_digit(c1, c2, bitfield, idx),
-            (Some(c1), None, None) => one_digit(c1, bitfield, idx),
+            (Some(c1), Some(c2), Some(c3)) => three_digit(c1, c2, c3, bitfield, idx)?,
+            (Some(c1), Some(c2), None) => two_digit(c1, c2, bitfield, idx)?,
+            (Some(c1), None, None) => one_digit(c1, bitfield, idx)?,
             _ => unreachable!("The iterator cannot produce leading Nones"),
         };
         idx += inc;
     }
 
-    idx
+    Ok(idx)
 }
 
-fn encode_alpha(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
+fn encode_alpha(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> Result<usize> {
     // The iterator will panic on 0-characters.
     if data.is_empty() {
-        return start_idx;
+        return Err(QrError::DataEncodeError {
+            reason: "Empty string sent to encode_alpha".to_string(),
+        });
     }
     let mut idx = start_idx;
 
@@ -313,8 +331,8 @@ fn encode_alpha(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -
 
         match (c1, c2) {
             (Some(c1), Some(c2)) => {
-                let c1_val = get_alphanumeric_value(c1);
-                let c2_val = get_alphanumeric_value(c2);
+                let c1_val = get_alphanumeric_value(c1)?;
+                let c2_val = get_alphanumeric_value(c2)?;
                 let rval = 45 * c1_val + c2_val;
                 let masked = rval & ALPHA_TWO_CHAR;
                 bitfield[idx..idx + ALPHA_LENGTH].store_be(masked);
@@ -322,7 +340,7 @@ fn encode_alpha(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -
             }
             // Perhaps this is firing multiple times.
             (Some(c1), None) => {
-                let c1_val = get_alphanumeric_value(c1);
+                let c1_val = get_alphanumeric_value(c1)?;
                 let masked = c1_val & ALPHA_ONE_CHAR;
                 bitfield[idx..idx + ALPHA_HALF_LENGTH].store_be(masked);
                 idx += ALPHA_HALF_LENGTH;
@@ -331,7 +349,7 @@ fn encode_alpha(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -
         }
     }
 
-    idx
+    Ok(idx)
 }
 
 // RETURNS THE IDX of the next insertion point.
@@ -355,14 +373,18 @@ fn encode_bytes(data: &str, bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -
 }
 
 #[cfg(feature = "kanji")]
-fn encode_kanji(data: &[u8], bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> usize {
+fn encode_kanji(data: &[u8], bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) -> Result<usize> {
     let mut idx = start_idx;
     // This function can only be called if data's length is even.
-    assert!(
-        data.len() & 1 == 0,
-        "Kanji non-even byte size: {}",
-        data.len()
-    );
+    if data.len() & 1 != 0 {
+        return Err(QrError::DataEncodeError {
+            reason: format!(
+                "Two byte kanji is required for kanji encoding. \
+                            Data len: {}",
+                data.len()
+            ),
+        });
+    }
 
     // 2 bytes = 1 kanji
     for chunk in data.chunks(2) {
@@ -375,7 +397,15 @@ fn encode_kanji(data: &[u8], bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) 
         let subtraction = match double_byte {
             0x8140..=0x9FFC => double_byte - 0x8140,
             0xE040..=0xEBBF => double_byte - 0xC140,
-            _ => unreachable!("Kanji should be in valid byte range."),
+            _ => {
+                return Err(QrError::DataEncodeError {
+                    reason: format!(
+                        "Kanji outside of valid byte ranges: 0x8140..=0x9FFC or 0xE040..=0xEBBF.\n\
+                    byte: {:X}",
+                        double_byte
+                    ),
+                });
+            }
         };
 
         // Split hi and lo and do the following:
@@ -386,12 +416,10 @@ fn encode_kanji(data: &[u8], bitfield: &mut BitVec<u8, Msb0>, start_idx: usize) 
         idx += KANJI_BIT_LEN;
     }
 
-    idx
+    Ok(idx)
 }
 
-// TODO: better errors
-pub struct ISOError;
-fn try_encode_iso_8859_1(data: &str) -> Result<Vec<u8>, ISOError> {
+fn try_encode_iso_8859_1(data: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(data.len());
     for c in data.chars() {
         // Use 32-bits width to avoid overflow panic, cast on push.
@@ -399,17 +427,15 @@ fn try_encode_iso_8859_1(data: &str) -> Result<Vec<u8>, ISOError> {
         if code <= 255 {
             bytes.push(code as u8);
         } else {
-            return Err(ISOError);
+            return Err(QrError::UtfEncodeError(TextEncoding::ISO88591));
         }
     }
     Ok(bytes)
 }
 
-// TODO: Result type/better error handling.
-// For now, just panic.
 #[inline]
-fn get_alphanumeric_value(c: char) -> u16 {
-    match c {
+fn get_alphanumeric_value(c: char) -> Result<u16> {
+    let ch = match c {
         '0' => 0,
         '1' => 1,
         '2' => 2,
@@ -455,19 +481,16 @@ fn get_alphanumeric_value(c: char) -> u16 {
         '.' => 42,
         '/' => 43,
         ':' => 44,
-        _ => panic!("Invalid character: {c}"),
-    }
+        _ => {
+            return Err(QrError::DataEncodeError {
+                reason: format!("Invalid character for alphanumeric encoding: {c}"),
+            });
+        }
+    };
+    Ok(ch)
 }
 
 // ------GROUPING AND BLOCK SEGMENTATION-------
-// TODO: decide whether it's worth it to try and do it by collections of indices
-// It -should- be faster to just index the data/codeword block and flatten the error codewords.
-//
-// It is much easier to reason about as a multidimensional array though, so if this is painful,
-// Massage the data into an n-d array of codewords and accept the penalty.
-// Both ZXing and rxing use a Struct pair of Block/ECC as vectors.
-//
-// This could be a transparent tuple block
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 pub(crate) enum GroupNo {
@@ -476,12 +499,12 @@ pub(crate) enum GroupNo {
 }
 
 impl TryFrom<usize> for GroupNo {
-    type Error = ();
-    fn try_from(n: usize) -> Result<Self, Self::Error> {
+    type Error = QrError;
+    fn try_from(n: usize) -> std::result::Result<Self, Self::Error> {
         match n {
             0 => Ok(Self::Group1),
             1 => Ok(Self::Group2),
-            _ => Err(()),
+            _ => Err(QrError::InvalidGroup(n)),
         }
     }
 }
@@ -501,15 +524,20 @@ pub(crate) struct Block(
 impl Block {
     // The table index should be passed in and precomputed.
     // (version -1) * 4 + ecc_codeword_idx() -> when version is 1-idxd
-    pub(crate) fn new_data_block(start_idx: usize, group_no: GroupNo, table_idx: usize) -> Self {
+    pub(crate) fn new_data_block(
+        start_idx: usize,
+        group_no: GroupNo,
+        table_idx: usize,
+    ) -> Result<Self> {
         let num_codewords_per_block = match group_no {
             GroupNo::Group1 => NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_1[table_idx],
             GroupNo::Group2 => {
                 let g2_block_codewords = NUM_DATA_CODEWORDS_PER_BLOCK_GROUP_2[table_idx];
-                assert!(
-                    g2_block_codewords > 0,
-                    "table_idx is wrong: {table_idx}. Invalid version or ecc level."
-                );
+                if g2_block_codewords == 0 {
+                    return Err(QrError::DataEncodeError {
+                        reason: format!("Zero codewords retrieved for group 2 at: {table_idx}"),
+                    });
+                }
                 g2_block_codewords
             }
         };
@@ -517,7 +545,7 @@ impl Block {
         // Start is just the start_idx.
         // End index is start_idx + num_codewords_per_block - 1
         let end_idx = start_idx + (num_codewords_per_block as usize) - 1;
-        Self((start_idx, end_idx))
+        Ok(Self((start_idx, end_idx)))
     }
 
     // NOTE: the interface for this function doesn't match the data block
@@ -543,7 +571,7 @@ pub(crate) struct Group(Vec<Block>);
 impl Group {
     // The table index should be passed in and precomputed.
     // (version -1) * 4 + ecc_codeword_idx() -> when version is 1-idxd
-    pub(crate) fn new(start_idx: usize, group_no: GroupNo, table_idx: usize) -> Self {
+    pub(crate) fn new(start_idx: usize, group_no: GroupNo, table_idx: usize) -> Result<Self> {
         let mut idx = start_idx;
 
         // Number of blocks per group is going to depend on the group number.
@@ -552,10 +580,11 @@ impl Group {
             GroupNo::Group2 => {
                 let g2_blocks = NUM_BLOCKS_GROUP_2[table_idx];
                 // TODO: refactor to result once done.
-                assert!(
-                    g2_blocks > 0,
-                    "table_idx is wrong: {table_idx}. Invalid version or ecc level."
-                );
+                if g2_blocks == 0 {
+                    return Err(QrError::DataEncodeError {
+                        reason: format!("Zero blocks retrieved for group 2 at: {table_idx}"),
+                    });
+                }
                 g2_blocks
             }
         };
@@ -563,13 +592,13 @@ impl Group {
         let mut res = Vec::with_capacity(num_blocks_per_group as usize);
 
         for _ in 0..num_blocks_per_group {
-            let block = Block::new_data_block(idx, group_no, table_idx);
+            let block = Block::new_data_block(idx, group_no, table_idx)?;
             // Update the indices, the idx is now end_idx + 1
             idx = block.end_idx() + 1;
             res.push(block);
         }
 
-        Self(res)
+        Ok(Self(res))
     }
 
     pub(crate) fn blocks(&self) -> &[Block] {
@@ -583,7 +612,7 @@ pub(crate) struct QrSegmentation(Vec<Group>);
 
 impl QrSegmentation {
     // SUPPLY VERSION 1-indexed
-    pub(crate) fn new(total_codewords: usize, ecc_level: ECCLevel, version: usize) -> Self {
+    pub(crate) fn new(total_codewords: usize, ecc_level: ECCLevel, version: usize) -> Result<Self> {
         // Table indexing:
         // (version -1) * 4 + ecc_codeword_idx()
 
@@ -601,15 +630,15 @@ impl QrSegmentation {
 
         let mut res = Vec::with_capacity(num_groups);
         for i in 0..num_groups {
-            let group_no = i
-                .try_into()
-                .expect("There are only two groups, this should map 1:1 with a C enum");
-            let group = Group::new(idx, group_no, table_idx);
+            let group_no = i.try_into()?;
+            let group = Group::new(idx, group_no, table_idx)?;
             // Update the index, is going to be last block's end_idx + 1
             let end_idx = group
                 .blocks()
                 .last()
-                .expect("There should be at least one block in the group.")
+                .ok_or(QrError::DataEncodeError {
+                    reason: "Empty set of blocks in group when computing segmentation".to_string(),
+                })?
                 .end_idx();
 
             // New starting index.
@@ -619,27 +648,31 @@ impl QrSegmentation {
             res.push(group);
         }
 
-        // (This should really be a result/error condition)
-        // TODO: refactor out the panics/assertions once the code is tested.
         // Assert that the last index + 1 = total_codewords.
-        //
         let end_idx = res
             .last()
-            .expect("There should be at least one group.")
+            .ok_or(QrError::DataEncodeError {
+                reason: "Empty set of groups when checking index invariants.".to_string(),
+            })?
             .blocks()
             .last()
-            .expect("There should be at least one block in the group.")
+            .ok_or(QrError::DataEncodeError {
+                reason: "Empty set of blocks when checking index invariants.".to_string(),
+            })?
             .end_idx();
 
-        assert_eq!(
-            end_idx + 1,
-            total_codewords,
-            "INDEX ARITHMETIC IS INCORRECT."
-        );
+        if end_idx + 1 != total_codewords {
+            return Err(QrError::DataEncodeError {
+                reason: format!(
+                    "Index invariant violated. End idx: {end_idx} should be 1 less than {total_codewords}"
+                ),
+            });
+        }
 
         // Wrap the group vector and return.
-        Self(res)
+        Ok(Self(res))
     }
+
     pub(crate) fn groups(&self) -> &[Group] {
         &self.0
     }
@@ -678,11 +711,11 @@ pub(crate) fn compute_blocks(
     num_data_codewords: usize,
     ecc_level: ECCLevel,
     version: usize,
-) -> Vec<Block> {
+) -> Result<Vec<Block>> {
     // Segment the data
-    let segmentation = QrSegmentation::new(num_data_codewords, ecc_level, version);
+    let segmentation = QrSegmentation::new(num_data_codewords, ecc_level, version)?;
     // Flatten it.
-    segmentation.flatten_to_blocks()
+    Ok(segmentation.flatten_to_blocks())
 }
 
 // Parent should pre-look up this information.
@@ -694,7 +727,7 @@ pub(crate) fn compute_ecc_codewords(
     data: &[u8],
     blocks: &[Block],
     ec_codewords_per_block: usize,
-) -> (Vec<u8>, Vec<Block>) {
+) -> Result<(Vec<u8>, Vec<Block>)> {
     let mut reed_solomon = ReedSolomon::new();
 
     let num_blocks = blocks.len();
@@ -708,9 +741,17 @@ pub(crate) fn compute_ecc_codewords(
         let start_idx = block.start_idx();
         let end_idx = block.end_idx();
         let mut next_ecc_bytes =
-            reed_solomon.encode(&data[start_idx..=end_idx], ec_codewords_per_block);
+            reed_solomon.encode(&data[start_idx..=end_idx], ec_codewords_per_block)?;
 
-        assert_eq!(next_ecc_bytes.len(), ec_codewords_per_block);
+        if next_ecc_bytes.len() != ec_codewords_per_block {
+            return Err(QrError::DataEncodeError {
+                reason: format!(
+                    "Failed to compute the correct number of error correction bytes.\n
+                            Expected: {ec_codewords_per_block}, received: {}",
+                    next_ecc_bytes.len()
+                ),
+            });
+        }
 
         let next_ecc_block =
             Block::new_ecc_block(ecc_block_idx, ecc_block_idx + next_ecc_bytes.len() - 1);
@@ -720,7 +761,7 @@ pub(crate) fn compute_ecc_codewords(
         ecc_block_data.push(next_ecc_block);
     }
 
-    (res, ecc_block_data)
+    Ok((res, ecc_block_data))
 }
 
 // This function only does the interleaving.

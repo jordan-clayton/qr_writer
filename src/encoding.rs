@@ -5,6 +5,8 @@ use regex::Regex;
 use std::num::NonZero;
 use std::sync::OnceLock;
 
+use crate::errors::{QrError, Result};
+
 // TODO: remove this once ecc moved here.
 use crate::ecc::ECCLevel;
 
@@ -18,7 +20,7 @@ pub struct EncodingHints {
 }
 
 // TODO: bring versioning over here to reduce modules.
-// TODO: bring ecc over here to reduce modules.
+// TODO: bring ecc over here to reduce number of modules.
 
 // TODO: refactor this into an enumeration
 pub const ENC_NUMERIC: u8 = 1;
@@ -26,8 +28,6 @@ pub const ENC_ALPHA: u8 = 2;
 pub const ENC_BYTES: u8 = 4;
 pub const ENC_KANJI: u8 = 8;
 
-// TODO: look at making these static and guard with a OnceLock in case of
-// multithreading.
 static NUMERIC: OnceLock<Regex> = OnceLock::new();
 static ALPHANUMERIC: OnceLock<Regex> = OnceLock::new();
 static LATIN1: OnceLock<Regex> = OnceLock::new();
@@ -85,8 +85,6 @@ pub(crate) fn get_data_encoding_mode(data: &str) -> u8 {
     }
 }
 
-// TODO: move this to actual errors.
-pub struct InvalidVersionError;
 // NUM BITS IN LENGTH FIELD (character counter)
 // --------------------------------------------------------
 // | ENCODING   (mode) | VER: 1-9 | VER: 10-26 | VER 27-40|
@@ -107,21 +105,20 @@ pub(crate) fn get_mode_idx(mode: u8) -> usize {
     (7 - mode.leading_zeros()) as usize
 }
 
-pub(crate) fn get_bit_length(mode: u8, version: u8) -> Result<u8, InvalidVersionError> {
+pub(crate) fn get_bit_length(mode: u8, version: u8) -> Result<u8> {
     let ver_idx = match version {
         1..=9 => 0,
         10..=26 => 1,
         27..=40 => 2,
-        _ => return Err(InvalidVersionError),
+        _ => return Err(QrError::InvalidVersion),
     } as usize;
 
     let mode_idx = get_mode_idx(mode);
-    assert!(
-        mode_idx <= 3,
-        "Invalid mode idx: {mode_idx}, mode: {mode}, leading_zeros: {}",
-        mode.leading_zeros()
-    );
-    Ok(BIT_LENGTH[mode_idx * 3 + ver_idx])
+    if mode_idx > 3 {
+        Err(QrError::InvalidMode(mode))
+    } else {
+        Ok(BIT_LENGTH[mode_idx * 3 + ver_idx])
+    }
 }
 
 // TODO: this needs testing.
@@ -163,21 +160,22 @@ fn is_double_byte_kanji(data: &str) -> bool {
 
 // NUMERIC: 0-9 digits
 fn init_numeric() -> Regex {
-    Regex::new(r"^\d*$").unwrap()
+    Regex::new(r"^\d*$").expect("Numeric regex expected to compile without issue.")
 }
 
 // ALPHANUMERIC: 0-9, A-Z (uppercase only), $, %, *, +, -, ., /, :, and space
 fn init_alphanumeric() -> Regex {
-    Regex::new(r"^[\dA-Z$%*+\-\ \.\/\:]*$").unwrap()
+    Regex::new(r"^[\dA-Z$%*+\-\ \.\/\:]*$").expect("Alnum regex expected to compile without issue.")
 }
 
 // BYTE MODE: ISO-8859-1 charset. Some QR scanners can detect UTF8 (ECI specified) in byte mode.
 fn init_latin1() -> Regex {
-    Regex::new(r"^[\x00-\xff]*$").unwrap()
+    Regex::new(r"^[\x00-\xff]*$").expect("ISO-8859-1 regex expected to compile without issue.")
 }
 
 #[cfg(feature = "kanji")]
 // KANJI: Double-byte chars, Shift JIS charset (2 bytes vs utf8's 3-4)
 fn init_kanji() -> Regex {
-    Regex::new(r"^[\p{Han}\p{Hiragana}\p{Katakana}]*$").unwrap()
+    Regex::new(r"^[\p{Han}\p{Hiragana}\p{Katakana}]*$")
+        .expect("Kanji regex expected to compile without issue.")
 }

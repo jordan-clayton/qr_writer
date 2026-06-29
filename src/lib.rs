@@ -1,6 +1,6 @@
 mod ecc;
 mod encoding;
-mod errors;
+pub mod errors;
 #[cfg(any(feature = "png", feature = "image", feature = "svg"))]
 mod export;
 mod galois;
@@ -73,8 +73,6 @@ mod tests {
     // NOTE: these are still complemented internally (0 = false = white)
     // so these will need to be complemented on comparison.
     use rxing::common::BitMatrix;
-    #[cfg(feature = "svg")]
-    use rxing::qrcode::common::ErrorCorrectionLevel::L;
     use rxing::{BarcodeFormat, EncodeHintValue, EncodeHints, Writer};
 
     // This will only be used if the image/svg crates are pulled in.
@@ -110,11 +108,11 @@ mod tests {
         assert_eq!(mode, 4);
 
         // Ensure it's version 2
-        let version = get_min_required_version(data.len(), mode, ECCLevel::M);
+        let version = get_min_required_version(data.len(), mode, ECCLevel::M).unwrap();
         assert_eq!(version, 2);
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::M);
-        let (res, _, _) = encode_data_to_bytes(data, hints);
+        let (res, _, _) = encode_data_to_bytes(data, hints).unwrap();
         assert_eq!(res, expect);
     }
     #[test]
@@ -131,13 +129,13 @@ mod tests {
         assert_eq!(mode, 2);
 
         // Ensure it's version 1
-        let version = get_min_required_version(data.len(), mode, ECCLevel::Q);
+        let version = get_min_required_version(data.len(), mode, ECCLevel::Q).unwrap();
         assert_eq!(version, 1);
 
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
         // This should be a V1-Q code
-        let (res, _, _) = encode_data_to_bytes(data, hints);
+        let (res, _, _) = encode_data_to_bytes(data, hints).unwrap();
         assert_eq!(res, expect);
 
         // TEST CASE FOR V7
@@ -145,14 +143,14 @@ mod tests {
         // String is: HELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLD
 
         let v7_test = data.repeat(11);
-        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q).unwrap();
 
         assert_eq!(v7_version, 7);
 
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
 
-        let (processed, _, _) = encode_data_to_bytes(&v7_test, hints);
+        let (processed, _, _) = encode_data_to_bytes(&v7_test, hints).unwrap();
 
         let expected_v7: [u8; 88] = [
             0x23, 0xCB, 0x0B, 0x78, 0xD1, 0x72, 0xDC, 0x4D, 0x44, 0xB4, 0xA2, 0xDE, 0x4E, 0x74,
@@ -189,11 +187,11 @@ mod tests {
         assert_eq!(mode, 1);
 
         // Ensure it's version 1.
-        let version = get_min_required_version(data.len(), mode, ECCLevel::Q);
+        let version = get_min_required_version(data.len(), mode, ECCLevel::Q).unwrap();
         assert_eq!(version, 1);
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
-        let (res, _, _) = encode_data_to_bytes(data, hints);
+        let (res, _, _) = encode_data_to_bytes(data, hints).unwrap();
         assert_eq!(res, expect);
     }
 
@@ -219,13 +217,13 @@ mod tests {
         let char_count = data.len() / 3;
 
         // Assert version 1.
-        let version = get_min_required_version(char_count, mode, ECCLevel::H);
+        let version = get_min_required_version(char_count, mode, ECCLevel::H).unwrap();
         assert_eq!(version, 1);
 
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::H);
         // EC level H -> 9 codepoints.
-        let (res, _, _) = encode_data_to_bytes(data, hints);
+        let (res, _, _) = encode_data_to_bytes(data, hints).unwrap();
         assert_eq!(res, expect);
     }
 
@@ -286,8 +284,8 @@ mod tests {
 
     #[test]
     fn test_gf_inverse() {
-        let a = gf_exp(4);
-        let inv = gf_inverse(a);
+        let a = gf_exp(4).unwrap();
+        let inv = gf_inverse(a).unwrap();
 
         let testval = gf_multiply(a, inv);
         let rem = testval.rem_euclid(FIELD_SIZE);
@@ -301,28 +299,28 @@ mod tests {
     #[test]
     fn test_polynomial_add() {
         // 83x^2 + 202
-        let a = GaloisPolynomial::new(&[83, 0, 202]);
+        let a = GaloisPolynomial::new(&[83, 0, 202]).unwrap();
         // 31x + 153
-        let b = GaloisPolynomial::new(&[0, 31, 153]);
+        let b = GaloisPolynomial::new(&[0, 31, 153]).unwrap();
         // 83 XOR 0 = 83, 0 XOR 31 = 31
         // 202 = 0xCA = 0b11001010
         // 153 = 0x99 = 0b10011001
         // XOR => 0b01010011 = 0x53 = 83
-        let expected = GaloisPolynomial::new(&[83, 31, 83]);
+        let expected = GaloisPolynomial::new(&[83, 31, 83]).unwrap();
 
-        let c = gf_poly_add(&a, &b);
+        let c = gf_poly_add(&a, &b).unwrap();
         assert_eq!(c, expected);
     }
 
     #[test]
     fn test_polynomial_multiply() {
         // x + 2
-        let a = GaloisPolynomial::new(&[1, 2]);
+        let a = GaloisPolynomial::new(&[1, 2]).unwrap();
         // x + 3
-        let b = GaloisPolynomial::new(&[1, 3]);
+        let b = GaloisPolynomial::new(&[1, 3]).unwrap();
         // (x + 2)(x + 3) = x^2 + x + 6
-        let expected = GaloisPolynomial::new(&[1, 1, 6]);
-        let c = gf_poly_mul(&a, &b);
+        let expected = GaloisPolynomial::new(&[1, 1, 6]).unwrap();
+        let c = gf_poly_mul(&a, &b).unwrap();
         assert_eq!(c, expected);
     }
 
@@ -330,13 +328,13 @@ mod tests {
     // This is just the inverse of the multiplication, but it should tease out immediate errors.
     #[test]
     fn test_polynomial_divide() {
-        let dividend = GaloisPolynomial::new(&[1, 1, 6]);
-        let divisor = GaloisPolynomial::new(&[1, 3]);
+        let dividend = GaloisPolynomial::new(&[1, 1, 6]).unwrap();
+        let divisor = GaloisPolynomial::new(&[1, 3]).unwrap();
 
-        let expect_quotient = GaloisPolynomial::new(&[1, 2]);
+        let expect_quotient = GaloisPolynomial::new(&[1, 2]).unwrap();
         let expect_remainder = gf_poly_zero();
 
-        let (quotient, remainder) = gf_poly_divide(&dividend, &divisor);
+        let (quotient, remainder) = gf_poly_divide(&dividend, &divisor).unwrap();
         assert_eq!(quotient, expect_quotient, "Quotient failure");
         assert_eq!(remainder, expect_remainder, "Remainder failure");
     }
@@ -344,16 +342,13 @@ mod tests {
     #[test]
     fn test_multiply_by_monomial() {
         // x + 2
-        let a = GaloisPolynomial::new(&[1, 2]);
+        let a = GaloisPolynomial::new(&[1, 2]).unwrap();
         // * (x ^ 2)
         // (x + 2)(x^2) = (x^3 + 2x^2) = [1, 2, 0, 0]
-        let expect = GaloisPolynomial::new(&[1, 2, 0, 0]);
-        let res = gf_poly_multiply_by_monomial(&a, 2, 1);
+        let expect = GaloisPolynomial::new(&[1, 2, 0, 0]).unwrap();
+        let res = gf_poly_multiply_by_monomial(&a, 2, 1).unwrap();
         assert_eq!(res, expect);
     }
-
-    // TODO:
-    // - Test to confirm that poly_multiplication with 0-degree monomials still properly multiply.
 
     // This is to tease out discrepancies between the EXP table and the
     // examples on Thonky.com
@@ -428,7 +423,7 @@ mod tests {
 
         // Compute the generator polynomial.
         let mut rs_encoder = ReedSolomon::new();
-        let generator = rs_encoder.build_generator(ec_bytes);
+        let generator = rs_encoder.build_generator(ec_bytes).unwrap();
         let generator_coefficients = generator.coefficients();
 
         // Double check the exponents are correct first.
@@ -539,13 +534,13 @@ mod tests {
         assert_eq!(mode, 2);
 
         // Ensure it's version 1
-        let version = get_min_required_version(data.len(), mode, ECCLevel::M);
+        let version = get_min_required_version(data.len(), mode, ECCLevel::M).unwrap();
         assert_eq!(version, 1);
 
         // This should be a V1-M code
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::M);
-        let (data_codewords, _, _) = encode_data_to_bytes(data, hints);
+        let (data_codewords, _, _) = encode_data_to_bytes(data, hints).unwrap();
         assert_eq!(data_codewords, expect_data_codewords);
 
         // Encode the ec bytes.
@@ -555,7 +550,7 @@ mod tests {
         assert_eq!(ec_bytes, 10);
 
         let mut rs_encoder = ReedSolomon::new();
-        let ec_codewords = rs_encoder.encode(&data_codewords, ec_bytes);
+        let ec_codewords = rs_encoder.encode(&data_codewords, ec_bytes).unwrap();
 
         // Confirm the EC codewords
         assert_eq!(ec_codewords, expect_ec_codewords);
@@ -582,7 +577,8 @@ mod tests {
             ECCLevel::Q,
             // Version 5
             5,
-        );
+        )
+        .unwrap();
 
         // The group/block data is known, so this will just be hardcoded
         // -> it can be looked up by table, OR
@@ -653,12 +649,13 @@ mod tests {
             ECCLevel::Q,
             // Version 5
             5,
-        );
+        )
+        .unwrap();
         // Flatten into a block vector.
         let blocks = segmentation.flatten_to_blocks();
 
         // Pass to the ECC computation
-        let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&data, &blocks, ec_bytes);
+        let (ecc_bytes, ecc_blocks) = compute_ecc_codewords(&data, &blocks, ec_bytes).unwrap();
         assert_eq!(ecc_blocks.len(), 4, "Invalid block computation.");
 
         // Examine the blocks.
@@ -696,7 +693,7 @@ mod tests {
         let data = "HELLO WORLD";
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
-        let (processed, _, _) = prepare_qr_codewords(data, hints);
+        let (processed, _, _) = prepare_qr_codewords(data, hints).unwrap();
 
         let expected: [u8; 26] = [
             0x20, 0x5B, 0x0B, 0x78, 0xD1, 0x72, 0xDC, 0x4D, 0x43, 0x40, 0xEC, 0x11, 0xEC, 0xA8,
@@ -714,13 +711,13 @@ mod tests {
         // String is: HELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLDHELLO WORLD
 
         let v7_test = data.repeat(11);
-        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q).unwrap();
 
         assert_eq!(v7_version, 7);
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
 
-        let (processed, _, _) = prepare_qr_codewords(&v7_test, hints);
+        let (processed, _, _) = prepare_qr_codewords(&v7_test, hints).unwrap();
 
         let expected_v7: [u8; 196] = [
             0x23, 0x8A, 0x3A, 0x9D, 0xCE, 0xE7, 0xCB, 0x6E, 0x45, 0x22, 0x91, 0x48, 0x0B, 0xF9,
@@ -760,7 +757,7 @@ mod tests {
         // -> test this with existing online encoders and compare by inspection until the full
         // implementation is complete and can be automated.
         let v7_test = data.repeat(11);
-        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q).unwrap();
 
         assert_eq!(v7_version, 7);
 
@@ -774,10 +771,10 @@ mod tests {
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, Some(hints));
+        let encoded_v1 = encode_qr(data, Some(hints)).unwrap();
         let enc_v1_mat = encoded_v1.matrix();
         // Per the selection algorithm, this is returning mask 0
-        let encoded_v7 = encode_qr(&v7_test, Some(hints));
+        let encoded_v7 = encode_qr(&v7_test, Some(hints)).unwrap();
         let enc_v7_mat = encoded_v7.matrix();
 
         // This is rxing's EncodeHints
@@ -810,7 +807,7 @@ mod tests {
             for j in 0..n_v1 {
                 let (y, x) = ((i + QUIET_ZONE_SIZE) as u32, (j + QUIET_ZONE_SIZE) as u32);
                 // 1 = true = black for both encodings.
-                let lhs = enc_v1_mat.get(i, j).inner();
+                let lhs = enc_v1_mat.get(i, j).unwrap().inner();
                 // GET IS REVERSED IN RXING -> it's using x = horizontal = column
                 let rhs = expect_v1.get(x as u32, y as u32);
                 assert_eq!(
@@ -836,7 +833,7 @@ mod tests {
             for j in 0..n_v7 {
                 let (y, x) = ((i + QUIET_ZONE_SIZE) as u32, (j + QUIET_ZONE_SIZE) as u32);
                 // 1 = true = black for both encodings.
-                let lhs = enc_v7_mat.get(i, j).inner();
+                let lhs = enc_v7_mat.get(i, j).unwrap().inner();
                 let rhs = expect_v7.get(x, y);
                 assert_eq!(
                     lhs, rhs,
@@ -860,14 +857,14 @@ mod tests {
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
         let v7_test = data.repeat(11);
-        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q);
+        let v7_version = get_min_required_version(v7_test.len(), 2, ECCLevel::Q).unwrap();
 
         assert_eq!(v7_version, 7);
 
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, Some(hints));
+        let encoded_v1 = encode_qr(data, Some(hints)).unwrap();
         // Per the selection algorithm, this is returning mask 0
-        let encoded_v7 = encode_qr(&v7_test, Some(hints));
+        let encoded_v7 = encode_qr(&v7_test, Some(hints)).unwrap();
 
         // Grab the side lengths before render (and adding the quiet zone)
         // RXing's encoder appends the quiet zone to the final matrix, so this needs to be
@@ -877,8 +874,8 @@ mod tests {
 
         // These are in -pixel- values, so they're complement QR values.
         // They also add the quiet-zone size in their rendered size (like the rxing bitmatrices).
-        let v1_bytes = encoded_v1.render();
-        let v7_bytes = encoded_v7.render();
+        let v1_bytes = encoded_v1.render().unwrap();
+        let v7_bytes = encoded_v7.render().unwrap();
 
         // The default ECC level is L (I believe), so this needs to be passed in to the rxing encoding.
         let qr_hints =
@@ -908,7 +905,7 @@ mod tests {
 
         for i in 0..v1_bytes_side_len as usize {
             for j in 0..v1_bytes_side_len as usize {
-                let lhs = *v1_bytes.get(i, j);
+                let lhs = *v1_bytes.get(i, j).unwrap();
                 // Ensure it's only 1 bit.
                 assert!((0u8..=1).contains(&lhs));
                 let (x, y) = (j as u32, i as u32);
@@ -934,7 +931,7 @@ mod tests {
         // V7 BYTE CHECK.
         for i in 0..v7_bytes_side_len as usize {
             for j in 0..v7_bytes_side_len as usize {
-                let lhs = *v7_bytes.get(i, j);
+                let lhs = *v7_bytes.get(i, j).unwrap();
                 // Ensure it's only 1 bit.
                 assert!((0u8..=1).contains(&lhs));
                 let (x, y) = (j as u32, i as u32);
@@ -964,9 +961,9 @@ mod tests {
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, Some(hints));
+        let encoded_v1 = encode_qr(data, Some(hints)).unwrap();
 
-        let rendered = encoded_v1.render();
+        let rendered = encoded_v1.render().unwrap();
 
         // Make the file path
         let crate_dir = env!("CARGO_MANIFEST_DIR");
@@ -1002,11 +999,8 @@ mod tests {
         let img_10p5x = img_dir.join("hello_world_10p5x.png");
         let fract_side_length = (side_len as f32 * 10.5).floor() as usize;
 
-        let res_3 = {
-            let (png, _is_fract) =
-                resize_and_render_image_exact(&rendered, Some(fract_side_length));
-            write_png(&img_10p5x, &png)
-        };
+        let res_3 = resize_and_render_image_exact(&rendered, Some(fract_side_length))
+            .and_then(|(png, _is_fract)| write_png(&img_10p5x, &png));
 
         assert!(
             res_3.is_ok(),
@@ -1028,11 +1022,12 @@ mod tests {
     }
 
     #[cfg(any(feature = "svg", feature = "png"))]
+    #[test]
     fn test_nearest_integer() {
         let old_len = 21 as usize;
         let new_len_greater = (21f32 * 10.50).floor() as usize;
 
-        let nearest_pos = nearest_integer_multiple(old_len, new_len_greater);
+        let nearest_pos = nearest_integer_multiple(old_len, new_len_greater).unwrap();
 
         if let IntegerInverse::Multiply(nearest_pos) = nearest_pos {
             assert_eq!(nearest_pos, 11, "Calculation is off in nearest positive.");
@@ -1042,7 +1037,7 @@ mod tests {
 
         let old_len = 210;
         let new_len = 21;
-        let nearest_neg = nearest_integer_multiple(old_len, new_len);
+        let nearest_neg = nearest_integer_multiple(old_len, new_len).unwrap();
 
         if let IntegerInverse::Divide(nearest_neg) = nearest_neg {
             assert_eq!(nearest_neg, 10, "Calculation is off in nearest, divide.");
@@ -1053,7 +1048,7 @@ mod tests {
         let old_len = 21;
         let new_len = (old_len as f32 * 10.5).floor() as usize;
 
-        let nearest_fract_pos = nearest_integer_multiple(old_len, new_len);
+        let nearest_fract_pos = nearest_integer_multiple(old_len, new_len).unwrap();
 
         if let IntegerInverse::Multiply(nearest_fract_pos) = nearest_fract_pos {
             assert_eq!(
@@ -1068,7 +1063,7 @@ mod tests {
         let new_len = (0.75 * old_len as f32).floor() as usize;
         let expect_len = 105;
 
-        let nearest_fract_neg = nearest_integer_multiple(old_len, new_len);
+        let nearest_fract_neg = nearest_integer_multiple(old_len, new_len).unwrap();
 
         if let IntegerInverse::Divide(nearest_fract_neg) = nearest_fract_neg {
             assert_eq!(
@@ -1096,9 +1091,9 @@ mod tests {
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
         // Per the selection algorithm, this is returning mask 6
-        let encoded_v1 = encode_qr(data, Some(hints));
+        let encoded_v1 = encode_qr(data, Some(hints)).unwrap();
 
-        let rendered = encoded_v1.render();
+        let rendered = encoded_v1.render().unwrap();
         let side_length = rendered.side_length();
 
         // Make the file path
@@ -1131,8 +1126,8 @@ mod tests {
 
         // Run an svg export with 10x scaling with resampling
         let img_10x_with_resample = img_dir.join("hello_world_10x_with_resample.svg");
-        let svg = render_svg_with_resampling(&rendered, Some(side_length * 10), None);
-        let res_3 = write_svg(&img_10x_with_resample, &svg);
+        let res_3 = render_svg_with_resampling(&rendered, Some(side_length * 10), None)
+            .and_then(|svg| write_svg(&img_10x_with_resample, &svg));
 
         assert!(
             res_3.is_ok(),
@@ -1147,9 +1142,9 @@ mod tests {
         let data = "HELLO WORLD";
         let mut hints = EncodingHints::default();
         hints.ecc_level = Some(ECCLevel::Q);
-        let encoded = encode_qr(data, Some(hints));
+        let encoded = encode_qr(data, Some(hints)).unwrap();
 
-        let render = encoded.render();
+        let render = encoded.render().unwrap();
 
         // Make the file path
         let crate_dir = env!("CARGO_MANIFEST_DIR");
@@ -1203,7 +1198,7 @@ mod tests {
         let mut sq_matrix = SquareMatrix::new(side_length);
         assert_eq!(sq_matrix.side_length(), 21);
 
-        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version);
+        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version).unwrap();
         let (mat, _side_length) = sq_matrix.destructure_into_bytes();
         let expect: [u8; 441] = [
             //                   //                   //
@@ -1250,8 +1245,8 @@ mod tests {
         let mut sq_matrix = SquareMatrix::new(side_length);
         assert_eq!(sq_matrix.side_length(), 21);
 
-        emplace_timing_patterns(&mut sq_matrix);
-        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version);
+        emplace_timing_patterns(&mut sq_matrix).unwrap();
+        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version).unwrap();
         let (mat, _side_length) = sq_matrix.destructure_into_bytes();
         let expect: [u8; 441] = [
             // x = timing-pattern column/row.
@@ -1311,9 +1306,9 @@ mod tests {
         let mut sq_matrix = SquareMatrix::new(side_length);
         assert_eq!(sq_matrix.side_length(), 25);
 
-        emplace_timing_patterns(&mut sq_matrix);
-        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version);
-        emplace_alignment_squares(&mut sq_matrix, version);
+        emplace_timing_patterns(&mut sq_matrix).unwrap();
+        emplace_finder_patterns_into_blank_matrix(&mut sq_matrix, version).unwrap();
+        emplace_alignment_squares(&mut sq_matrix, version).unwrap();
         let (mat, _side_length) = sq_matrix.destructure_into_bytes();
         let expect: [u8; 25 * 25] = [
             // x = timing-pattern column/row.
@@ -1415,9 +1410,9 @@ mod tests {
 
         let data = "HELLO WORLD";
 
-        let encoded = encode_qr(&data, Some(hints));
+        let encoded = encode_qr(&data, Some(hints)).unwrap();
         let side_length = encoded.side_length();
-        let rendered = encoded.render();
+        let rendered = encoded.render().unwrap();
 
         let rxing_hints = EncodeHints::default()
             .with(EncodeHintValue::ErrorCorrection("Q".to_string()))
@@ -1425,9 +1420,8 @@ mod tests {
             .with(EncodeHintValue::QrVersion("40".to_string()));
         let rxing_format = BarcodeFormat::QR_CODE;
         let rxing_encoder = QRCodeWriter::default();
-        let qr_encoder = QRCodeWriter::default();
 
-        let expect = qr_encoder
+        let expect = rxing_encoder
             .encode_with_hints(
                 &data,
                 &rxing_format,
@@ -1453,7 +1447,7 @@ mod tests {
         // Byte check
         for i in 0..test_side_len as usize {
             for j in 0..test_side_len as usize {
-                let lhs = *rendered.get(i, j);
+                let lhs = *rendered.get(i, j).unwrap();
                 assert!((0u8..=1).contains(&lhs));
                 let (x, y) = (j as u32, i as u32);
                 // RXING stores the complement until image export
@@ -1470,9 +1464,9 @@ mod tests {
     // The ecc levels should match before sending the hints to rxing.
     // This function should be modified once hints have been implemented in -this- api.
     fn run_render_test_ecc_l_with_encode_hints(test_string: &str, encode_hints: &EncodeHints) {
-        let test_qr = encode_qr(test_string, None);
+        let test_qr = encode_qr(test_string, None).unwrap();
         let test_n = test_qr.matrix().side_length();
-        let test_render = test_qr.render();
+        let test_render = test_qr.render().unwrap();
 
         let rx_encoder = QRCodeWriter;
         let format = BarcodeFormat::QR_CODE;
@@ -1498,7 +1492,7 @@ mod tests {
         // Byte comparison -> the rx matrix will be complement mine.
         for i in 0..render_side_length as usize {
             for j in 0..render_side_length as usize {
-                let lhs = *test_render.get(i, j);
+                let lhs = *test_render.get(i, j).unwrap();
                 let rhs = !expect_render.get(j as u32, i as u32) as u8;
                 assert_eq!(lhs, rhs, "Bit mismatch at i: {i}, j: {j}");
             }
@@ -1506,9 +1500,9 @@ mod tests {
     }
 
     fn run_render_test_ecc_l(test_string: &str) {
-        let test_qr = encode_qr(test_string, None);
+        let test_qr = encode_qr(test_string, None).unwrap();
         let test_n = test_qr.matrix().side_length();
-        let test_render = test_qr.render();
+        let test_render = test_qr.render().unwrap();
 
         let rx_encoder = QRCodeWriter;
         let format = BarcodeFormat::QR_CODE;
@@ -1528,7 +1522,7 @@ mod tests {
         // Byte comparison -> the rx matrix will be complement mine.
         for i in 0..render_side_length as usize {
             for j in 0..render_side_length as usize {
-                let lhs = *test_render.get(i, j);
+                let lhs = *test_render.get(i, j).unwrap();
                 let rhs = !expect_render.get(j as u32, i as u32) as u8;
                 assert_eq!(lhs, rhs, "Bit mismatch at i: {i}, j: {j}");
             }

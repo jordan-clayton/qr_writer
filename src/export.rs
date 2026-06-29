@@ -8,6 +8,8 @@ use svg::node::element::Rectangle;
 #[cfg(any(feature = "image", feature = "png"))]
 use image::{DynamicImage, GrayImage, ImageFormat, Luma};
 
+use crate::errors::{ArithmeticError, QrError, Result};
+
 pub enum IntegerInverse {
     Divide(usize),
     Multiply(usize),
@@ -15,15 +17,31 @@ pub enum IntegerInverse {
 
 // This is a convenience function to avoid fractional scaling
 #[inline]
-pub fn nearest_integer_multiple(old_side_length: usize, new_side_length: usize) -> IntegerInverse {
+pub fn nearest_integer_multiple(
+    old_side_length: usize,
+    new_side_length: usize,
+) -> Result<IntegerInverse> {
     if new_side_length < old_side_length {
-        let n = (old_side_length as f32 / new_side_length as f32).ceil() as usize;
-        IntegerInverse::Divide(n)
+        if new_side_length == 0 {
+            Err(QrError::ArithmeticError(ArithmeticError::ZeroDivision))
+        } else {
+            let n = (old_side_length as f32 / new_side_length as f32).ceil() as usize;
+
+            Ok(IntegerInverse::Divide(n))
+        }
     } else if new_side_length > old_side_length {
-        let n = (new_side_length as f32 / old_side_length as f32).ceil() as usize;
-        IntegerInverse::Multiply(n)
+        if old_side_length == 0 {
+            Err(QrError::ArithmeticError(ArithmeticError::ZeroDivision))
+        } else {
+            let n = (new_side_length as f32 / old_side_length as f32).ceil() as usize;
+            Ok(IntegerInverse::Multiply(n))
+        }
     } else {
-        IntegerInverse::Multiply(1)
+        if new_side_length == 0 {
+            Err(QrError::ArithmeticError(ArithmeticError::ZeroDivision))
+        } else {
+            Ok(IntegerInverse::Multiply(1))
+        }
     }
 }
 
@@ -69,7 +87,7 @@ pub fn render_svg_with_resampling(
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
     hints: Option<SvgHints>,
-) -> Document {
+) -> Result<Document> {
     let side_len = matrix.side_length();
 
     let n = match side_length {
@@ -108,10 +126,12 @@ pub fn render_svg_with_resampling(
             // Check whether to resample
             let val = if needs_resample {
                 // Here we resample and just write more square units.
-                matrix.sample_matrix(i, j, n)
+                matrix.sample_matrix(i, j, n)?
             } else {
                 // Same size/clamped = read directly from the matrix
-                *matrix.get(i, j)
+                *matrix.get(i, j).ok_or(QrError::RenderError {
+                    reason: format!("Invalid read at i: {i}, j: {j} during svg render."),
+                })?
             };
 
             if 0 == val {
@@ -147,7 +167,7 @@ pub fn render_svg_with_resampling(
             }
         }
     }
-    doc
+    Ok(doc)
 }
 
 // Prefer this function -> it's more accurate and can handle fractional scaling.
@@ -157,8 +177,7 @@ pub fn render_svg_without_resampling(
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
     hints: Option<SvgHints>,
-) -> Document {
-    const BLOCK_SIZE: usize = 1;
+) -> Result<Document> {
     let old_side_length = matrix.side_length();
 
     let n = match side_length {
@@ -200,7 +219,9 @@ pub fn render_svg_without_resampling(
     for i in 0..old_side_length {
         // j == x
         for j in 0..old_side_length {
-            let val = *matrix.get(i, j);
+            let val = *matrix.get(i, j).ok_or(QrError::RenderError {
+                reason: format!("Invalid read at i: {i}, j: {j} during svg render."),
+            })?;
             if 0 == val {
                 // Just cast everything to f32
                 let mut rect = Rectangle::new()
@@ -240,7 +261,7 @@ pub fn render_svg_without_resampling(
         }
     }
 
-    doc
+    Ok(doc)
 }
 
 // Supply None to just use the matrix.side_length()
@@ -253,37 +274,38 @@ pub fn save_svg(
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
     hints: Option<SvgHints>,
-) -> Result<(), String> {
-    let svg = render_svg_without_resampling(matrix, side_length, hints);
-    write_svg(file_path, &svg)
+) -> Result<()> {
+    let svg = render_svg_without_resampling(matrix, side_length, hints)?;
+    Ok(write_svg(file_path, &svg)?)
 }
 
 #[inline]
 #[cfg(feature = "svg")]
-pub(crate) fn write_svg(file_path: &Path, svg: &Document) -> Result<(), String> {
-    let res = svg::save(file_path, svg);
-    res.map_err(|e| format!("ERROR: {}\nKIND: {}", e.to_string(), e.kind()))
+pub(crate) fn write_svg(file_path: &Path, svg: &Document) -> Result<()> {
+    Ok(svg::save(file_path, svg)?)
 }
 
 // --------- IMAGES -------
 
 #[inline]
 #[cfg(feature = "image")]
-pub fn render_image(matrix: &SquareMatrix<u8>) -> DynamicImage {
+pub fn render_image(matrix: &SquareMatrix<u8>) -> Result<DynamicImage> {
     let n = matrix.side_length();
     let mut img = GrayImage::new(n as u32, n as u32);
     // The buffer has to be written, since this the assumption is 8bits per pixel.
     // It thus has an r, g, and b channel.
     for i in 0..n {
         for j in 0..n {
-            let val = *matrix.get(i, j);
+            let val = *matrix.get(i, j).ok_or(QrError::RenderError {
+                reason: format!("Invalid read at i: {i}, j: {j} when rendering image."),
+            })?;
             // Multiply it by 255, black will cancel this out.
             let color = val * 0xFF;
             *img.get_pixel_mut(j as u32, i as u32) = Luma([color]);
         }
     }
 
-    DynamicImage::ImageLuma8(img)
+    Ok(DynamicImage::ImageLuma8(img))
 }
 
 // TODO: docstring
@@ -295,26 +317,39 @@ pub fn render_image(matrix: &SquareMatrix<u8>) -> DynamicImage {
 pub fn resize_and_render_image(
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
-) -> DynamicImage {
+) -> Result<DynamicImage> {
     let old_side_length = matrix.side_length();
+
     let n = side_length
         .and_then(|new_len| {
             let mul = nearest_integer_multiple(old_side_length, new_len);
 
-            let new_len = match mul {
-                IntegerInverse::Divide(n) => old_side_length / n,
-                IntegerInverse::Multiply(n) => old_side_length * n,
-            };
-            Some(new_len)
+            match mul {
+                Ok(mul) => {
+                    let new_len = match mul {
+                        IntegerInverse::Divide(n) => {
+                            if n == 0 {
+                                return Some(Err(QrError::ArithmeticError(
+                                    ArithmeticError::ZeroDivision,
+                                )));
+                            }
+                            old_side_length / n
+                        }
+                        IntegerInverse::Multiply(n) => old_side_length * n,
+                    };
+                    Some(Ok(new_len))
+                }
+                Err(e) => Some(Err(e)),
+            }
         })
-        .unwrap_or(old_side_length);
+        .unwrap_or(Ok(old_side_length))?;
 
     // Destructuring the SquareMatrix consumes it, so this has to clone
     // the borrow.
 
     // If the size is not the same size as the old side_len, the matrix has to be resized
     let export_image = if n != old_side_length {
-        matrix.resize(n)
+        matrix.resize(n)?
     } else {
         matrix.clone()
     };
@@ -325,14 +360,16 @@ pub fn resize_and_render_image(
     // It thus has an r, g, and b channel.
     for i in 0..n {
         for j in 0..n {
-            let val = *export_image.get(i, j);
+            let val = *export_image.get(i, j).ok_or(QrError::RenderError {
+                reason: format!("Invalid read at i: {i}, j: {j} during image render."),
+            })?;
             // Multiply it by 255, black will cancel this out.
             let color = val * 0xFF;
             *img.get_pixel_mut(j as u32, i as u32) = Luma([color]);
         }
     }
 
-    DynamicImage::ImageLuma8(img)
+    Ok(DynamicImage::ImageLuma8(img))
 }
 
 // TODO: refactor this interface:
@@ -361,7 +398,7 @@ pub fn resize_and_render_image(
 pub fn resize_and_render_image_exact(
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
-) -> (DynamicImage, bool) {
+) -> Result<(DynamicImage, bool)> {
     let old_side_length = matrix.side_length();
     let n = match side_length {
         Some(new_len) => new_len,
@@ -373,7 +410,7 @@ pub fn resize_and_render_image_exact(
 
     // If the size is not the same size as the old side_len, the matrix has to be resized
     let export_image = if n != old_side_length {
-        matrix.resize(n)
+        matrix.resize(n)?
     } else {
         matrix.clone()
     };
@@ -384,7 +421,9 @@ pub fn resize_and_render_image_exact(
     // It thus has an r, g, and b channel.
     for i in 0..n {
         for j in 0..n {
-            let val = *export_image.get(i, j);
+            let val = *export_image.get(i, j).ok_or(QrError::RenderError {
+                reason: format!("Invalid read at i: {i}, j:{j} during image render."),
+            })?;
             // Multiply it by 255, black will cancel this out.
             let color = val * 0xFF;
             *img.get_pixel_mut(j as u32, i as u32) = Luma([color]);
@@ -397,7 +436,7 @@ pub fn resize_and_render_image_exact(
         old_side_length.rem_euclid(n) > 0
     };
 
-    (DynamicImage::ImageLuma8(img), is_fract)
+    Ok((DynamicImage::ImageLuma8(img), is_fract))
 }
 
 // TODO: document -> if users wish to use a different type of format, they can operate on the
@@ -408,17 +447,14 @@ pub fn save_png(
     file_path: &Path,
     matrix: &SquareMatrix<u8>,
     side_length: Option<usize>,
-) -> Result<(), String> {
-    let png = resize_and_render_image(matrix, side_length);
+) -> Result<()> {
+    let png = resize_and_render_image(matrix, side_length)?;
     write_png(file_path, &png)
 }
 
 #[inline]
 #[cfg(feature = "png")]
-pub(crate) fn write_png(file_path: &Path, png: &DynamicImage) -> Result<(), String> {
+pub(crate) fn write_png(file_path: &Path, png: &DynamicImage) -> Result<()> {
     let format = ImageFormat::Png;
-
-    png.save_with_format(file_path, format)
-        // TODO: better error handling
-        .map_err(|e| format!("ERROR: {}\nKIND: {}", e.to_string(), &e))
+    Ok(png.save_with_format(file_path, format)?)
 }
