@@ -1,4 +1,9 @@
 # TODO:
+
+## Cleanup
+- Implement result/option-based bounds checking on table lookups
+- Refactor bitvector indexing into result/option-based access
+
 ## Next Steps 
-- API cleanup refactoring
-- Write readme
+- Write README.md
+- Add LICENSE.md
