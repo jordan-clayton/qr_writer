@@ -1,8 +1,8 @@
 # TODO:
 
 ## Cleanup
-- Implement result/option-based bounds checking on table lookups
-- Refactor bitvector indexing into result/option-based access
+- Complete error implementation
+- Clean up comments
 
 ## Next Steps 
 - Write README.md
